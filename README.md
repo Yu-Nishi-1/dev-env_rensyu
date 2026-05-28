@@ -1,50 +1,72 @@
-### 練習問題(AI指示)
+### 練習問題（AI指示）
 
 「回答を生成する前に、以下のルールを厳守してください：
 すぐに正解のTerraformコードを書かないでください。
 まずは、私がこの課題を解くために作成すべき『ファイル構成』と、各ファイルで『どのdataソースやリソースを使うべきかという設計方針』のみを箇条書きで提示してください。
 その後、私が1ファイルずつコードを提示するので、シニアSREの視点でレビューと修正アドバイスを行ってください。実務レベルの厳しい基準（保守性、疎結合、命名規則）でお願いします。」
 
-### 【プロジェクト：bridge】要件定義の再構築
+---
+
+### 【プロジェクト：bridge】要件定義
 
 #### 1. 背景と目的
-プラットフォームのマイクロサービス化に伴い、新規サービス追加時のインフラ作業依頼がリリース速度の制約となっている。サービス **bridge** は、既存基盤環境とエンドユーザーを接続するAPI中継層として構築する。本プロジェクトの目的は、既存基盤の設定変更を回避し、開発チームによる自律的かつ安全な新規機能デプロイを完遂することにある。既存の安定した稼働を維持しつつ、並行して新機能を迅速に市場へ投入するための柔軟なインフラストラクチャを確立する。
+
+プラットフォームのマイクロサービス化に伴い、新規サービス追加時のインフラ作業依頼がリリース速度の制約となっている。サービス **bridge** は、既存基盤環境とエンドユーザーを接続する API 中継層として構築する。本プロジェクトの目的は、既存基盤の設定変更を回避し、開発チームによる自律的かつ安全な新規機能デプロイを完遂することにある。
+
+さらに、複数のサービスを共通の仕組みでデプロイできる運用基盤（モノレポ＋再利用可能ワークフロー）を確立し、`bridge` をその最初のサービスとして載せる。リリース時のダウンタイムを抑えるため Blue/Green デプロイを採用し、練習環境のコストを抑えるため時間帯に応じたスケジュールスケーリングを行う。既存の安定稼働を維持しつつ、並行して新機能を迅速に市場へ投入できる柔軟なインフラを目指す。
 
 #### 2. システムの役割
-* **トラフィック制御**: 既存共通ALBの背後に配置し、パス `/api/v2/*` へのリクエストを処理する。既存のApache基盤（Legacy App）へのトラフィックを阻害せず、特定のパス配下のみを新環境へ動的にルーティングする。
+
+* **トラフィック制御**: 既存共通 ALB の背後に配置し、パス `/api/v2/*` へのリクエストを処理する。既存の Apache 基盤（Legacy App）へのトラフィックを阻害せず、特定パス配下のみを新環境へ動的にルーティングする。
 * **データ参照**: 既存共有データベース（MySQL）からデータを取得し、新規ロジックを適用してレスポンスを生成する。既存のデータ整合性を保護しつつ、読み取りおよび特定の更新処理を bridge サービスから実行可能にする。
-* **セキュリティ維持**: 既存DBのセキュリティレベルを維持し、新規サービスに対して必要最小限のアクセス権限を動的に付与する。既存のセキュリティグループに直接変更を加えず、追加のルール注入によって通信を制御する。
+* **セキュリティ維持**: 既存 DB のセキュリティレベルを維持し、新規サービスに必要最小限のアクセス権限を動的に付与する。既存のセキュリティグループに直接変更を加えず、追加ルールの注入によって通信を制御する。
+* **無停止デプロイ**: アプリ更新時は Blue/Green デプロイを行い、テストリスナー経由で新リビジョンを検証してから本番リスナーのトラフィックを切り替える。
 
 #### 3. アーキテクチャ方針
-既存基盤の整合性を保護しつつ、独立した実行環境を迅速に構築する。シングルコンテナ内でWebサーバーとアプリケーションを完結させ、疎結合な構成を実現する。Fargateの特性を活かしたスケーラビリティを確保し、コンテナイメージには実行に必要な最小限のバイナリのみを含めることで、起動時間の短縮と脆弱性への攻撃表面の削減を両立させる。構成管理はすべてTerraformで行い、環境ごとの差異は変数定義によって吸収する。
-ネットワーク設計においては、コスト最適化およびセキュリティ強化の観点から、プライベートサブネット内のリソースが AWS サービス（S3・Secrets Manager・CloudWatch Logs等）へインターネットを経由せずアクセスできるよう VPC Endpoint を構成する。
-可観測性（Observability）を担保するため、ログ、メトリクス、アラートの収集基盤を構築すること。
-通信は可能な限りHTTPSを使用し、セキュリティを確保する。
+
+既存基盤の整合性を保護しつつ、独立した実行環境を迅速に構築する。シングルコンテナ内で Web サーバーとアプリケーションを完結させ、疎結合な構成を実現する。Fargate の特性を活かしたスケーラビリティを確保し、コンテナイメージには実行に必要な最小限のバイナリのみを含めることで、起動時間の短縮と攻撃表面の削減を両立させる。構成管理はすべて Terraform で行い、環境ごとの差異は変数定義によって吸収する。
+
+ランタイム（Nginx + PHP-FPM + PHP 拡張 + Composer）は、複数サービスで共有できる **ベースイメージ** として専用リポジトリで管理する。アプリイメージはこのベースイメージを `FROM` し、最小差分で構築する。これにより複数サービスがランタイムを共有でき、ビルド時間とメンテナンスコストを削減する。すべて Alpine Linux を基盤とし、軽量・最小構成を徹底する。
+
+ネットワークは、コスト最適化およびセキュリティ強化の観点から、プライベートサブネット内のリソースが AWS サービス（S3・Secrets Manager・CloudWatch Logs・ECR 等）へインターネットを経由せずアクセスできるよう VPC Endpoint を構成する。可観測性（Observability）を担保するため、ログ・メトリクス・アラートの収集基盤を構築する。通信は可能な限り HTTPS を使用する。
+
+ECS サービスは CodeDeploy による Blue/Green デプロイで更新する。CI/CD は再利用可能ワークフロー（template）と Composite Action で共通化し、サービス・環境ごとの差異は番号付きトリガーワークフローと設定ファイル（conf）で吸収する。
 
 #### 4. 技術的制約および遂行基準
-* **イメージ最適化**: マルチステージビルドを使用し、実行用イメージにビルドツール（gcc, make等）を含めないこと。
+
+* **イメージ最適化**: マルチステージビルドを使用し、実行用イメージにビルドツール（gcc, make 等）を含めないこと。
 * **サイズ削減**: パッケージインストール後のキャッシュ（`apk cache` 等）を同一レイヤー内で削除すること。
-* **セキュリティ**: `USER` 命令を用いて非特権ユーザー（UID:1000等）でプロセスを実行すること。
+* **イメージ二層化**: ランタイム層を「ベースイメージ（専用リポジトリ）」、アプリ層を「ベースイメージを `FROM` するアプリイメージ」に分離すること。すべて Alpine Linux ベースとすること。
+* **セキュリティ**: `USER` 命令を用いて非特権ユーザー（UID:1000 等）でプロセスを実行すること。
 * **権限管理**: アプリケーション実行ユーザーの書込権限を `storage/`, `bootstrap/cache/` のみに限定すること。
 * **ポータビリティ**: 接続先情報等の機密情報をイメージに焼かず、ランタイム環境変数で注入可能にすること。
-* **ネットワーク**: プライベートサブネット内のECSタスクがECRや外部AWSサービスへアクセスできるようにすること（VPC Endpoint）。
+* **待ち受けポート**: コンテナ（Nginx）は **8080** で待ち受け、ALB ターゲットグループのポートも 8080 とすること。
+* **ネットワーク**: プライベートサブネット内の ECS タスクが ECR や外部 AWS サービスへアクセスできるようにすること（VPC Endpoint）。
 * **監視**: CloudWatch Logs を用いてアプリケーションおよびコンテナログを収集すること。
-* **メトリクス**: ECSサービスのCPU・メモリ使用率を監視し、異常時にアラートを発報できるようにすること。
-* **アラート閾値**: CloudWatch Alarm は CPU使用率70%超過を閾値とすること。
-* **可用性**: ECSサービスは単一インスタンスではなく、最小2タスク以上で稼働可能な設計とすること。
-* **スケーリング**: CPU使用率またはALBリクエスト数に基づいたAuto Scalingを構成すること。
-* **セキュリティ（通信）**: ALBにはHTTPSリスナーを追加し、ACM証明書を利用すること。
-* **セキュリティ（防御）**: 必要に応じてAWS WAFの導入を検討すること。
-* **State管理**: Terraformの状態管理はS3バックエンドおよびDynamoDBロックを用いること。
+* **メトリクス**: ECS サービスの CPU・メモリ使用率を監視し、異常時にアラートを発報できるようにすること。
+* **アラート閾値**: CloudWatch Alarm は CPU 使用率 70% 超過を閾値とすること。
+* **可用性**: ECS サービスは単一インスタンスではなく、最小2タスク以上で稼働可能な設計とすること。
+* **スケーリング**: CPU 使用率または ALB リクエスト数に基づいた Auto Scaling を構成すること。
+* **デプロイ方式**: ECS サービスは `deployment_controller = CODE_DEPLOY` とし、Blue/Green 用にターゲットグループを2つ、本番リスナーとテストリスナーを用意すること。
+* **マイグレーション**: デプロイ前に、稼働中サービスの task definition を取得し、`command` を `php artisan migrate --force` で override した単発タスク（`run-task`）として実行すること。失敗時はデプロイを中断すること。
+* **セキュリティ（通信）**: ALB に HTTPS リスナー（443）を追加し、ACM 証明書を利用すること。
+* **セキュリティ（防御）**: 必要に応じて AWS WAF の導入を検討すること。
+* **CI/CD 共通化**: Composite Action、再利用可能ワークフロー（template）、サービス・環境別の番号付きトリガーワークフローの三層構成とすること。
+* **設定の外部化**: 環境固有値（ECR リポジトリ名、ECS クラスタ／サービス／タスク定義名、CodeDeploy アプリ／グループ名、desired count、subnet / SG）は設定ファイル（`deploy.conf` / `base-build.conf`）に切り出し、スクリプトが `source` すること。
+* **クロスリポジトリ認証**: ベースイメージ用リポジトリの checkout は GitHub App トークン（`actions/create-github-app-token`）で行うこと。AWS 認証は OIDC を用いること。
+* **スケジュールスケーリング**: 時間帯（on-hours / off-hours）に応じて desired count を変更できるスクリプトとスケジュール実行を用意すること。production は 0 台にできない安全弁を設けること。
+* **State 管理**: Terraform の状態管理は S3 バックエンドおよび DynamoDB ロックを用いること。
 
 **シナリオ：既存「共通プラットフォーム」へのマイクロサービス追加構築**
-あなたは、社内標準のインフラ基盤（Shared Platform）上に、新規サービスをデプロイする担当者です。既存基盤側（VPC、DB、ALB）のコードには一切触れず、外部参照（dataソース）とルールの追加注入のみで、安全かつ保守性の高い環境を構築してください。
+
+あなたは、社内標準のインフラ基盤（Shared Platform）上に新規サービスをデプロイする担当者です。既存基盤側（VPC・DB・ALB）のコードには一切触れず、外部参照（data ソース）とルールの追加注入のみで、安全かつ保守性の高い環境を構築してください。さらに、この `bridge` を「複数サービス共通のデプロイ運用基盤」に載せ、無停止デプロイとコスト最適化を成立させてください。
 
 ---
 
 #### 第１部：共通基盤の構築
 
 **課題１：shared_platform の構築**
+
 以下の仕様に従い、`shared_platform/` ディレクトリ配下の全ファイルを自分で作成してください。第２部以降の前提環境となります。
 
 **ディレクトリ構成**
@@ -67,7 +89,7 @@ shared_platform/
 | **main.tf** | AWSプロバイダ（ap-northeast-1）。`default_tags` に `Scope = "SharedPlatform"`、`Environment = "common"`、`ManagedBy = "terraform"` を付与する。`required_version >= 1.5.0`、プロバイダバージョン `~> 5.0`。 |
 | **vpc.tf** | VPC CIDR: `10.0.0.0/16`（`enable_dns_hostnames = true`）。パブリックサブネット2つ（1a: `10.0.101.0/24`、1c: `10.0.102.0/24`、`Type = "Public"` タグ）。プライベートサブネット2つ（1a: `10.0.1.0/24`、1c: `10.0.2.0/24`、`Type = "Private"` タグ）。**NAT Gateway は使用しない**（コスト最適化のため）。プライベートRTにはデフォルトルートを設定しない。legacy_web（EC2）の `dnf install` はカスタムAMIで対応する（後述のコスト最適化構成を参照）。RDS はVPC内完結のためインターネット通信不要。 |
 | **security_groups.tf** | ALB用SG（80/443をインターネットから許可）。LegacyApp用SG（80をALB SGからのみ許可）。RDS用SG（3306をLegacyApp SGからのみ許可）。bridge サービス用の3306許可ルールは `my_new_service` 側から `aws_security_group_rule` で後付け注入する設計にすること。全SGをこのファイルに集約する。 |
-| **alb.tf** | 共通ALB（パブリックサブネット2AZ配置）。Port 80 HTTPリスナー（デフォルト: 固定レスポンス200）。LegacyApp用ターゲットグループ（Port 80、ヘルスチェックパス: `/`）。リスナールール Priority 100、パス `*` → LegacyApp TGにフォワード。bridge サービスは Priority < 100 のルールを後から追加して `/api/v2/*` を先に捕捉させる。 |
+| **alb.tf** | 共通ALB（パブリックサブネット2AZ配置）。Port 80 HTTPリスナー（デフォルト: 固定レスポンス200）。LegacyApp用ターゲットグループ（Port 80、ヘルスチェックパス: `/`）。リスナールール Priority 100、パス `*` → LegacyApp TGにフォワード。bridge サービスは Priority < 100 のルールを後から追加して `/api/v2/*` を先に捕捉させる。Blue/Green 用のテストリスナーは `my_new_service` 側から本 ALB に追加するため、`outputs.tf` で ALB ARN とリスナー ARN を出力しておく。 |
 | **rds.tf** | RDS MySQL 8.0（`db.t3.micro`、gp2 20GB）。DB名 `app_db`、ユーザー `appuser`。プライベートサブネット2AZのサブネットグループ。`skip_final_snapshot = true`、`deletion_protection = false`（練習用途）。`utf8mb4` のパラメータグループを設定する。なお `users` テーブルの作成と初期データ（`taro`・`jiro`・`saburo`）の投入は、同一 VPC 内からアクセスできる `legacy_app.tf` の EC2 `user_data` 内で MySQL クライアントを使って行うこと（RDS はマネージドサービスのため `user_data` は使用不可）。`products` テーブルは bridge サービス側のマイグレーション（`php artisan migrate`）で管理するため、ここでは作成しない。 |
 | **legacy_app.tf** | Amazon Linux 2023 EC2（`t3.micro`）をプライベートサブネット `private_1a` に配置。SGは `legacy_app` を使用。**カスタムAMIを使用すること**（`httpd`・`php`・`php-mysqlnd`・`mariadb105` がインストール済みのAMIを事前に作成し指定する。作成手順は後述のコスト最適化構成を参照）。`user_data` では `dnf install` を行わず、RDS の起動完了を待つリトライループ処理（`until mysql -h "$DB_HOST" -u appuser -papppass -e "SELECT 1;" 2>/dev/null; do sleep 5; done` 等）から開始すること。接続確認後に MySQL クライアントで `users` テーブル（`id INT AUTO_INCREMENT PRIMARY KEY`、`name VARCHAR(50) NOT NULL`）を作成し `taro`・`jiro`・`saburo` の初期データを投入する。続けて `/var/www/html/index.php` に DB から `users` テーブルを取得して `<h1>Legacy Main Application</h1>` を出力するスクリプトを配置する。**DB接続先は RDS の `address` を Terraform 参照で注入すること**（タグ名・ハードコード禁止）。ALBターゲットグループへの登録も行う。 |
 | **network_ext.tf** | プライベートサブネット内のリソースが AWS サービスへインターネットを経由せずアクセスできるよう VPC Endpoint を構築する。既存環境で実際に使用しているサービスのみを対象とする。S3（Gateway型）、CloudWatch Logs（Interface型）。Interface型には専用SGを作成し、VPC CIDR からの443を許可する。 |
@@ -94,24 +116,39 @@ curl http://<ALB-DNS>/
 
 ---
 
-#### 第２部：機能要件
+#### 第２部：コンテナイメージの定義（二層化）
 
-**課題１：Dockerfileの作成**
-新規サービス bridge を動かすための、軽量でセキュアなコンテナイメージを定義してください。
+新規サービス bridge を動かす、軽量でセキュアなコンテナイメージを「ベースイメージ」と「アプリイメージ」の二層で定義してください。すべて Alpine Linux ベースとします。
 
 **アプリケーション要件**
 ・PHP 8.2 / Laravel 10系 / Alpine Linuxベース
-・Nginx + PHP-FPM（Port 80待機）
+・Nginx + PHP-FPM（Port 8080 待機）
 ・MySQL接続ドライバ、Composerインストール済み
 
-**Dockerfile上の以下ベストプラクティスに準拠すること**
-・ビルド用ステージと実行用ステージを分けること（buildステージでcomposer install --no-dev、productionステージで最小化コピー）。
-・機密情報の完全分離（Dockerfile内に環境変数を焼き込まない。config:cache等のビルド時制約を考慮した設計）
-・.dockerignore を適切に設定し、不要なファイル（.git やローカルの .env、vendor など）がイメージに含まれないようにすること。
-・ALBヘルスチェック（/up または /health_check）への応答
-・適切なディレクトリ権限設定（storage, bootstrap/cacheへの書き込み権限）
-・実行ユーザーの制限：コンテナ内プロセスを root ではなく一般ユーザーで実行すること。
-・Nginx の設定で `.env` 等の機密ファイルへの外部アクセスを遮断すること（該当パスへのリクエストに 403 または 404 を返すこと）。
+**課題１：ベースイメージ（ランタイム層／専用リポジトリ）**
+
+複数サービスで共有する PHP ランタイムを、アプリ本体とは別の専用リポジトリで管理します。第４部の Composite Action からビルド・プッシュできるようにすることが目的です。
+
+・**リポジトリ**: アプリ本体とは別の「コンテナ専用リポジトリ」（例: `project_bridge_container`）に置くこと。
+・**配置**: `docker/alpine/Dockerfile` という階層に配置すること（環境やディストリビューションごとに切り出せる規約とする）。
+・**内容**: Alpine ベースに、PHP 8.2、PHP-FPM、Nginx、MySQL 接続ドライバ（`pdo_mysql` 等）、Composer をインストール済みの状態にすること。アプリコードは含めず、ランタイムのみとすること。
+・**最適化**: `apk` キャッシュを同一レイヤー内で削除し、ビルドツールを残さないこと。
+・**タグ**: `base-build.conf` の `ECR_REPOSITORY` / `ECR_TAG` に従い、`:latest` と `:<short_hash>` の両方でプッシュする想定とすること（実際のプッシュは第４部の Composite Action が担当する）。
+
+**課題２：アプリイメージ（アプリ層／環境別 Dockerfile）**
+
+ベースイメージを土台に、アプリコードを載せた実行イメージを定義します。
+
+・**配置**: `services/bridge/env/<environment>/Dockerfile`（環境ごとに差し替え可能）。ビルド時にサービスディレクトリ直下へコピーされる前提とすること。
+・**ベース指定**: `FROM <アカウントID>.dkr.ecr.ap-northeast-1.amazonaws.com/<base-repo>:<tag>`（課題１のベースイメージ）とすること。
+・**マルチステージ**: build ステージで `composer install --no-dev --optimize-autoloader`、production ステージで最小コピーとすること。
+・**アプリコード取り込み**: `services/bridge/src/` と共通の `shared/` を取り込むこと。
+・**機密情報の完全分離**: Dockerfile 内に環境変数を焼き込まないこと。`config:cache` 等のビルド時制約を考慮した設計とすること。
+・**.dockerignore**: `.git`、ローカルの `.env`、`vendor` 等の不要なファイルがイメージに含まれないよう適切に設定すること。
+・**権限**: `storage`、`bootstrap/cache` への書き込み権限を付与し、`USER` 命令で非特権ユーザー（UID:1000 等）として実行すること。
+・**ポート**: Nginx を 8080 で待ち受けること。
+・**ヘルスチェック**: ALB ヘルスチェック（`/up` または `/health_check`）に応答すること。
+・**Nginx 設定**: `.env` 等の機密ファイルへの外部アクセスを遮断すること（該当パスへのリクエストに 403 または 404 を返すこと）。
 
 ---
 
@@ -119,50 +156,60 @@ curl http://<ALB-DNS>/
 
 > **前提**: 第１部で構築した `shared_platform/` をここから先は「既存基盤」として扱う。そのコードには一切触れず、外部参照（data ソース）とルールの追加注入のみで構築すること。
 
-本セクションでは、LaravelアプリケーションをAWS Fargate（ECS）上で稼働させるためのリソースを定義します。
+本セクションでは、Laravel アプリケーションを AWS Fargate（ECS）上で CodeDeploy Blue/Green により稼働させるためのリソースを定義します。
 
-**課題1：環境基盤と動的検索 (provider.tf, data.tf, variables.tf)**
-・terraform.workspace を使い、dev と prd でリソース名が衝突しないように命名を動的に制御する。
-・VPC IDやサブネットIDを直書きせず、タグフィルタ（Scope=SharedPlatform や Type=Private）で data ソースから取得する。
-・既存のALBリスナーARNを variable で受け取り、data ソースで参照する。
+**課題1：環境基盤と動的検索（provider.tf, data.tf, variables.tf）**
+・`terraform.workspace` を使い、dev と prd でリソース名が衝突しないように命名を動的に制御する。
+・VPC ID やサブネット ID を直書きせず、タグフィルタ（`Scope=SharedPlatform` や `Type=Private`）で data ソースから取得する。
+・既存の ALB リスナー ARN を variable で受け取り、data ソースで参照する。
 
-**課題2：セキュリティの「外付け」注入 (network.tf)**
-・新規サービス用のECSセキュリティグループ（SG）を作成する。
-・既存のRDS用SGのIDを data で取得し、aws_security_group_rule を用いて、新規サービス用SGからの3306通信を許可するルールを「後付け」で追加する。
-・ECSタスクのアウトバウンド通信を制御し、不要な外部通信を制限すること。
-・ECS FargateがECRからイメージをpullできるよう、Secret Manager（Interface型）、ECR API（Interface型）およびECR DKR（Interface型）のVPC Endpointを `network.tf` 内に追加すること。`shared_platform` 側のVPC Endpoint（S3・CloudWatch Logs）はそのまま共用できるため追加不要。
+**課題2：セキュリティの「外付け」注入（network.tf）**
+・新規サービス用の ECS セキュリティグループ（SG）を作成する。
+・既存の RDS 用 SG の ID を data で取得し、`aws_security_group_rule` を用いて、新規サービス用 SG からの 3306 通信を許可するルールを「後付け」で追加する。
+・ECS タスクのアウトバウンド通信を制御し、不要な外部通信を制限すること。
+・ECS Fargate が ECR からイメージを pull できるよう、Secrets Manager（Interface型）、ECR API（Interface型）および ECR DKR（Interface型）の VPC Endpoint を `network.tf` 内に追加すること。`shared_platform` 側の VPC Endpoint（S3・CloudWatch Logs）はそのまま共用できるため追加不要。
 
-**課題3：パスベースルーティング (alb.tf)**
-・既存の共有ALBに、パス /api/v2/* を受け持つリスナールールを追加する。
+**課題3：パスベースルーティングと Blue/Green 用リスナー（alb.tf）**
+・既存の共有 ALB に、パス `/api/v2/*` を受け持つリスナールールを追加する。
 ・リスナールールの優先度（Priority）は variable で管理し、既存サービスと重ならないようにする。
-・HTTPSリスナー（443）を追加し、HTTPからHTTPSへのリダイレクト設定を行うこと。
-・ACM証明書はDNS検証を用いて発行すること。なお、DNS検証レコードの実際の登録は省略してよい。`aws_acm_certificate` と `aws_acm_certificate_validation` の定義および `lifecycle { create_before_destroy = true }` の設定まで書けば合格とする。
+・HTTPS リスナー（443）を追加し、HTTP から HTTPS へのリダイレクト設定を行うこと。
+・ACM 証明書は DNS 検証を用いて発行すること。なお、DNS 検証レコードの実際の登録は省略してよい。`aws_acm_certificate` と `aws_acm_certificate_validation` の定義および `lifecycle { create_before_destroy = true }` の設定まで書けば合格とする。
+・Blue/Green 用のターゲットグループを2つ作成すること（例: `bridge-<env>-tg-blue` / `bridge-<env>-tg-green`、いずれも Port 8080、ヘルスチェック `/up` または `/health_check`）。
+・テストリスナーを追加すること（例: ポート 8443 等）。本番リスナー（443）とテストリスナーの ARN は CodeDeploy のデプロイグループから参照する。
+・本番リスナーの `/api/v2/*` ルールは初期状態で blue TG を向け、CodeDeploy が green への切替を行う前提とする。
 
-**課題4：疎結合なシークレット管理 (secrets.tf)**
-・AWS Secrets Managerを作成し、DBパスワードなどを格納する。
-・ECSのタスク定義内では、直接値を書かず、Secrets ManagerのARNを valueFrom で参照する。
+**課題4：疎結合なシークレット管理（secrets.tf）**
+・AWS Secrets Manager を作成し、DB パスワードなどを格納する。
+・ECS のタスク定義内では、直接値を書かず、Secrets Manager の ARN を `valueFrom` で参照する。
 
-**課題5：ECS Fargateの構築 (ecs.tf)**
-・ECSクラスター、タスク定義、サービスを構築する。
-・タスク定義には ignore_changes = [cpu, memory] を設定し、運用の柔軟性を持たせる。
-・コンテナ定義は .json.tftpl ファイルを templatefile 関数で読み込む形式にする。
-・CloudWatch Logs へのログ出力設定（awslogsドライバ）を行うこと。
-・サービスの desired_count は2以上とし、可用性を確保すること。
-・Application Auto Scaling を用いて、CPU使用率またはALBリクエスト数に応じたスケーリングを設定すること。
-・CloudWatch Alarm（CPU使用率70%超過）を `ecs.tf` 内に定義すること。
-・マイグレーション専用のタスク定義（`aws_ecs_task_definition`）を通常のアプリ用タスク定義とは別に定義すること。
-　- コンテナ起動コマンドは `php artisan migrate --force` とする。
-　- サービスとして常駐させず、単発実行（run-task）を前提とした設計にする。
-　- シーディング（初期データ投入）はマイグレーションとは分離し、初回のみ手動で `aws ecs run-task` を使って別途実行すること。
+**課題5：ECS Fargate の構築（ecs.tf）**
+・ECS クラスター、タスク定義、サービスを構築する。
+・`deployment_controller { type = "CODE_DEPLOY" }` を設定する（Blue/Green 用）。
+・タスク定義には `lifecycle { ignore_changes = [cpu, memory] }` を設定し、運用の柔軟性を持たせる。スケジュールスケーリングおよび Auto Scaling との競合を避けるため、`desired_count` も `ignore_changes` の対象とすること。
+・コンテナ定義は `.json.tftpl` ファイルを `templatefile` 関数で読み込む形式にする。コンテナ名は `bridge`、ContainerPort は 8080 とすること。
+・CloudWatch Logs へのログ出力設定（awslogs ドライバ）を行うこと。
+・サービスの `desired_count` は2以上とし、可用性を確保すること。
+・Application Auto Scaling を用いて、CPU 使用率または ALB リクエスト数に応じたスケーリングを設定すること。
+・CloudWatch Alarm（CPU 使用率 70% 超過）を `ecs.tf` 内に定義すること。
+・マイグレーションは専用タスク定義を作らず、稼働中サービスの task definition を `aws ecs describe-services` で取得し、`command` を `php artisan migrate --force` で override した単発タスク（`run-task`）として実行する方式とすること（実行は第４部の CI/CD が担当する）。
+・シーディング（初期データ投入）はマイグレーションとは分離し、初回のみ手動で `aws ecs run-task`（`command` を `db:seed` に override）で実行すること。
 
-**課題6：CI/CD パイプライン (.github/workflows/deploy.yml)**
-・GitHub Actions（OIDC）を使用してAWSに認証する。
-・workflow_dispatch でデプロイ環境を選択可能にする。
-・ビルドしたイメージに latest と ${github.sha} の両方のタグを付与してECRにプッシュする。
-・Terraform実行前に fmt / validate / plan を実行するステップを含めること。
-・**ECSサービスの更新前に、マイグレーション専用タスクを `aws ecs run-task` で単発実行し、完了を待ってからデプロイを進めること。** タスク内では `php artisan migrate --force` を実行する。マイグレーション失敗時はデプロイを中断すること。シーディング（`db:seed`）は初回のみ手動で実行すること。
-・デプロイ後にヘルスチェックエンドポイントへの疎通確認を自動実行すること。
-・ECRリポジトリは `resource_iam.tf` 内に `aws_ecr_repository` として定義し、リポジトリURIを `outputs.tf` から出力すること。
+**課題6：CodeDeploy（codedeploy.tf）**
+・`aws_codedeploy_app`（compute platform: ECS）を作成する。名前は `deploy.conf` の `CODEDEPLOY_APP_NAME` と一致させること。
+・`aws_codedeploy_deployment_group`（ECS Blue/Green）を作成する。名前は `CODEDEPLOY_GROUP_NAME` と一致させること。
+　- `deployment_style` は `BLUE_GREEN` ／ `WITH_TRAFFIC_CONTROL`。
+　- `blue_green_deployment_config` で切替方式と旧タスク終了の待機時間を設定する。
+　- `load_balancer_info` / `ecs_service` で、課題3の blue/green ターゲットグループと本番・テストリスナー、課題5の ECS クラスタ／サービスを紐付ける。
+・`appspec.json` は CI/CD が動的生成する前提とし、Terraform では作成しない。
+
+**課題7：CI/CD 連携と各種ロール（resource_iam.tf, outputs.tf）**
+・ECS タスク実行ロール／タスクロール、CodeDeploy 用サービスロール、GitHub Actions OIDC 用ロールを定義する。
+・ECR リポジトリを2つ `aws_ecr_repository` として定義する（アプリイメージ用＝`deploy.conf` の `ECR_REPOSITORY`、ベースイメージ用＝`base-build.conf` の `ECR_REPOSITORY`）。
+・`outputs.tf` から以下を出力し、`deploy.conf` / `base-build.conf` に転記できるようにすること。
+　- `ecr_repository_uri`（アプリ用）、`base_ecr_repository_uri`（ベース用）
+　- `ecs_cluster_name`、`ecs_service_name`、`ecs_task_def_family`
+　- `codedeploy_app_name`、`codedeploy_deployment_group_name`
+　- `private_subnet_ids`（→ `VPC_SUBNETS`）、`ecs_security_group_id`（→ `VPC_SECURITY_GROUPS`）
 
 **ディレクトリ構成**
 ```
@@ -171,30 +218,127 @@ my_new_service/
 ├── variables.tf     # パラメータ定義
 ├── data.tf          # 【課題1】既存基盤の検索定義
 ├── network.tf       # 【課題2】新規SG・既存SGへのルール追加・ECR用及びSecret Manager用VPC Endpoint追加
-├── alb.tf           # 【課題3】共有ALBへのパスベースルーティング設定
+├── alb.tf           # 【課題3】共有ALBへのパスベースルーティング・Blue/Green用TG・テストリスナー
 ├── secrets.tf       # 【課題4】Secrets Managerの定義
 ├── ecs.tf           # 【課題5】ECSクラスター・サービス・タスク定義
-├── resource_iam.tf  # 【課題6】各種実行ロールとGitHub連携設定・ECRリポジトリ定義
-├── outputs.tf       # デプロイに必要な情報の出力（ECRリポジトリURIを含む）
+├── codedeploy.tf    # 【課題6】CodeDeployアプリ・デプロイグループ
+├── resource_iam.tf  # 【課題7】各種実行ロール・GitHub連携設定・ECRリポジトリ定義
+├── outputs.tf       # 【課題7】デプロイに必要な情報の出力
 └── container_def.json.tftpl  # 【課題5】ECSコンテナ定義テンプレート
 
 env/
 └── dev/
     ├── terraform.tfvars    # 開発環境用変数値
-    └── terraform.tfbackend # S3バックエンド設定
-
-.github/
-└── workflows/
-    └── deploy.yml          # 【課題6】CI/CDパイプライン
-
-Dockerfile       # 【第２部】コンテナイメージ定義
-.dockerignore    # 【第２部】イメージに含めないファイルの除外設定
-Makefile         # Terraformコマンド共通化
+    └── terraform.tfbackend # S3バックエンド設定（key = env/dev/terraform.tfstate）
 ```
 
 ---
 
+#### 第４部：デプロイ運用モノレポと CI/CD パイプライン
+
+LaravelアプリのデプロイをGitHub Actionsで自動化します。複数サービスを共通の仕組みで扱えるよう、インフラ定義（第３部）とは別リポジトリの「デプロイ運用モノレポ」として構築します。
+
+**ディレクトリ構成**
+```
+（deploy-monorepo）/
+├── shared/                              # 全サービス共通コード（ビルド時に各サービスへコピー）
+├── services/
+│   └── bridge/
+│       ├── src/                         # Laravel アプリ本体（routes/api.php, migrations, seeders 等）
+│       └── env/
+│           ├── develop/
+│           │   ├── Dockerfile           # 第２部 課題2（アプリイメージ）
+│           │   ├── deploy.conf          # デプロイ用設定
+│           │   └── base-build.conf      # ベースビルド用設定
+│           └── production/
+│               └── …（同様）
+└── .github/
+    ├── actions/
+    │   └── base-build/action.yml        # Composite Action（ベースイメージのビルド＆プッシュ）
+    ├── scripts/
+    │   ├── prepare-base-build.sh        # base-build.conf を読み出力に書き出す
+    │   ├── prepare-docker-build.sh      # deploy.conf 読込、shared/ と Dockerfile をコピー
+    │   ├── prepare-ecs-deploy.sh        # deploy.conf 読込、appspec.json を動的生成
+    │   ├── run-migration.sh             # 稼働中タスク定義で migrate を単発実行
+    │   └── ecs-scale.sh                 # スケジュールスケーリング
+    └── workflows/
+        ├── 101-base-build-template.yml  # 再利用可能ワークフロー（base build）
+        ├── 101-base-build-bridge-dev.yml# トリガー（service/env を指定して template を呼ぶ）
+        ├── 201-deploy-template.yml       # 再利用可能ワークフロー（deploy）
+        ├── 201-deploy-bridge-dev.yml     # トリガー
+        └── 301-scale-bridge-dev.yml      # スケジュールスケーリング
+```
+
+> ベースイメージの Dockerfile はこのモノレポではなく、別のコンテナ専用リポジトリ（第２部 課題1）に置く。Composite Action がそれを checkout する。
+
+**課題1：設定ファイル（conf）の定義**
+
+各スクリプトが `source` する。Terraform の出力値（第３部 課題7）から転記する。
+
+`services/bridge/env/develop/base-build.conf`
+```
+ECR_REPOSITORY=<ベースイメージ用ECRリポジトリ名>
+ECR_TAG=latest
+```
+
+`services/bridge/env/develop/deploy.conf`
+```
+ECR_REPOSITORY=<アプリイメージ用ECRリポジトリ名>
+ECR_TAG=latest
+ECS_CLUSTER_NAME=<terraform output>
+ECS_SERVICE_NAME=<terraform output>
+ECS_TASK_DEF_NAME=<terraform output>
+CODEDEPLOY_APP_NAME=<terraform output>
+CODEDEPLOY_GROUP_NAME=<terraform output>
+DESIRED_COUNT=2
+ON_HOURS_DESIRED_COUNT=2
+OFF_HOURS_DESIRED_COUNT=0          # dev のみ 0 可。production は 0 禁止
+VPC_SUBNETS=<private subnet ids カンマ区切り>
+VPC_SECURITY_GROUPS=<ecs sg id>
+```
+
+**課題2：Composite Action（ベースイメージのビルド）**
+
+`.github/actions/base-build/action.yml` を作成する。
+・`inputs`: `environment` / `service` / `branch`（コンテナリポジトリのブランチ）/ `app_id` / `app_private_key`。
+・`actions/create-github-app-token` で一時トークンを生成し、`actions/checkout` で別リポジトリ（コンテナ専用リポジトリ）を checkout すること。
+・short hash を取得 → `aws-actions/configure-aws-credentials`（OIDC）→ `aws-actions/amazon-ecr-login`。
+・`prepare-base-build.sh` を実行して `ecr_repository` / `base_tag` / `registry` を取得すること。
+・`docker/setup-buildx-action` → `docker/build-push-action` で `container-repo/docker/alpine` をビルドし、`:<base_tag>` と `:<short_hash>` の両方をプッシュすること。キャッシュは `type=gha` を使うこと。
+
+**課題3：再利用可能ワークフローとトリガー**
+
+二層構成にする。
+・`101-base-build-template.yml`（`on: workflow_call`）: `inputs: service / environment / branch`、`secrets: inherit`。内部で課題2の Composite Action を呼ぶ。`permissions: { contents: read, id-token: write }`。
+・`101-base-build-bridge-dev.yml`（`on: workflow_dispatch`、`branch` 入力あり）: `uses: ./.github/workflows/101-base-build-template.yml` に `service: bridge` / `environment: develop` / `branch` を渡す。
+・`201-deploy-template.yml`（`on: workflow_call`）: デプロイ本体（課題4）。
+・`201-deploy-bridge-dev.yml`（`on: workflow_dispatch`）: `201-deploy-template.yml` を呼ぶ。
+・番号規約は `1xx`=ベースビルド、`2xx`=デプロイ、`3xx`=スケーリング とする。
+
+**課題4：デプロイワークフローの処理順序**
+
+`201-deploy-template.yml` は以下を順に実行し、いずれかが失敗したら後続を中断すること。
+1. GitHub Actions（OIDC）で AWS に認証 → ECR ログイン。
+2. アプリイメージのビルド＆プッシュ: `prepare-docker-build.sh` を実行（`shared/` と env 別 `Dockerfile` をコピー）→ `docker build` → `latest` と `${github.sha}` の両方のタグでプッシュ。
+3. マイグレーション: `run-migration.sh` を実行。稼働中タスク定義を取得 → `command` を `php artisan migrate --force` に override して `run-task`（`assignPublicIp=DISABLED`、subnets / securityGroups は conf から）→ `wait tasks-stopped` → 終了コードを検証し、非 0 ならデプロイを中断。
+4. Blue/Green デプロイ: `prepare-ecs-deploy.sh` で `appspec.json` を動的生成（ContainerName=`bridge`、ContainerPort=`8080`）→ 新タスク定義を登録 → `aws deploy create-deployment` で CodeDeploy による Blue/Green 切替。
+5. デプロイ後ヘルスチェック: `https://<ALB-DNS>/api/v2/status` 等へ疎通確認し、`database: OK` を検証。
+6. シーディング（`db:seed`）は初回のみ手動で実行し、通常デプロイでは実行しない。
+
+**課題5：スケジュールスケーリング**
+
+`301-scale-bridge-dev.yml` と `ecs-scale.sh` を作成する。
+・`ecs-scale.sh` は `service / environment / (on-hours|off-hours|manual)` を受け取り、conf の対応する desired count を選んで `aws ecs update-service --desired-count` を実行すること。
+・production を 0 台にしない安全弁を実装すること（`production` かつ `0` でエラー終了）。
+・トリガーは `on: schedule`（cron）で、平日朝に `on-hours`、夜間に `off-hours` を実行すること（JST は UTC 換算に注意）。`workflow_dispatch` で `manual` も選べるようにすること。
+・dev は `OFF_HOURS_DESIRED_COUNT=0` でコスト最適化、production は2台以上を維持すること。
+
+---
+
 #### Laravelアプリケーション側の準備
+
+`services/bridge/src/` 配下に配置する。
+
 * **ファイル**: `database/migrations/xxxx_xx_xx_create_products_table.php`
     ```php
     // bridge サービス専用テーブルのマイグレーション定義
@@ -256,7 +400,7 @@ Makefile         # Terraformコマンド共通化
 
 ---
 
-#### 成果物（全27ファイル想定）
+#### 成果物（全38ファイル想定）
 
 **第１部：shared_platform（8ファイル）**
 ・`shared_platform/main.tf`
@@ -268,11 +412,13 @@ Makefile         # Terraformコマンド共通化
 ・`shared_platform/legacy_app.tf`
 ・`shared_platform/outputs.tf`
 
-**第２部：コンテナ関連（2ファイル）**
-・`Dockerfile`
+**第２部：コンテナ関連（4ファイル）**
+・ベースイメージ `docker/alpine/Dockerfile`（コンテナ専用リポジトリ）
+・アプリイメージ `services/bridge/env/develop/Dockerfile`
 ・`.dockerignore`
+・`shared/`（共通コード一式）
 
-**第３部：Terraform 関連（10ファイル）**
+**第３部：Terraform 関連（11ファイル）**
 ・`my_new_service/provider.tf`
 ・`my_new_service/variables.tf`
 ・`my_new_service/data.tf`
@@ -280,6 +426,7 @@ Makefile         # Terraformコマンド共通化
 ・`my_new_service/alb.tf`
 ・`my_new_service/secrets.tf`
 ・`my_new_service/ecs.tf`
+・`my_new_service/codedeploy.tf`
 ・`my_new_service/resource_iam.tf`
 ・`my_new_service/outputs.tf`
 ・`my_new_service/container_def.json.tftpl`
@@ -289,64 +436,31 @@ Makefile         # Terraformコマンド共通化
 ・`database/seeders/ProductSeeder.php`
 ・`routes/api.php`
 
-**その他（4ファイル）**
-・`env/dev/terraform.tfvars`（`variables.tf` で定義した変数の dev 環境用の値を記載する）
-・`.github/workflows/deploy.yml`（課題6の成果物）
-・`Makefile`（`my_new_service/` 配下の Terraform 操作を対象に、`terraform init -backend-config=../env/dev/terraform.tfbackend` / `plan` / `apply` / `destroy` を `make` コマンドで実行できるよう共通化する）
-・`env/dev/terraform.tfbackend`（S3バックエンド設定。`bucket`・`key`・`region`・`dynamodb_table` を定義する。`key` は `env/dev/terraform.tfstate` とする）
+**設定ファイル（2ファイル）**
+・`services/bridge/env/develop/base-build.conf`
+・`services/bridge/env/develop/deploy.conf`
 
----
+**CI/CD 関連（8ファイル）**
+・`.github/actions/base-build/action.yml`
+・`.github/scripts/prepare-base-build.sh`
+・`.github/scripts/prepare-docker-build.sh`
+・`.github/scripts/prepare-ecs-deploy.sh`
+・`.github/scripts/run-migration.sh`
+・`.github/scripts/ecs-scale.sh`
+・`.github/workflows/101-base-build-template.yml`（＋ `101-base-build-bridge-dev.yml`）
+・`.github/workflows/201-deploy-template.yml`（＋ `201-deploy-bridge-dev.yml`）
+・`.github/workflows/301-scale-bridge-dev.yml`
 
-### 練習環境のコスト最適化構成
-
-本問題を練習環境（個人のAWSアカウント）で実施する場合、以下の構成でコストを月2,000円以内に抑えることができる。**本番環境では適用しないこと。**
-
-#### 基本方針
-- 作業時間中のみ `terraform apply` し、終了後は必ず `terraform destroy` を実行する
-- legacy_web（EC2）はNAT Gatewayを使わない設計のため、必要なパッケージを焼き込んだカスタムAMIを事前作成して使用する
-- ECRへのイメージプッシュはローカルから手動で行う
-
-#### カスタムAMI作成手順
-
-NAT Gatewayを使わない設計のため、`legacy_web` EC2は起動時に `dnf install` でインターネットへアクセスできない。そのため必要なパッケージをあらかじめ焼き込んだカスタムAMIを事前に作成しておく必要がある。手順は以下の通り。
-
-1. **パブリックサブネットで一時EC2を起動**（Amazon Linux 2023、`t3.micro`）
-2. **パッケージをインストール**
-   ```bash
-   sudo dnf install -y httpd php php-mysqlnd mariadb105
-   ```
-3. **AWSコンソールからAMIを作成**（EC2 → インスタンス → アクション → イメージとテンプレート → イメージを作成）
-4. **一時EC2を終了**
-5. **作成したAMIのIDを `legacy_app.tf` の `ami` に指定する**
-
-#### ECS FargateのECRアクセス
-
-ECS FargateからECRへのイメージpullは、第３部で `my_new_service` 側に Secret Manager用及びECR用VPC Endpoint（ECR API・ECR DKR）を追加することで対応する。`shared_platform` のVPC Endpoint（S3・CloudWatch Logs）はそのまま共用できる。ECRへのイメージプッシュはローカルから手動で実行する。
-
-```bash
-aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin <アカウントID>.dkr.ecr.ap-northeast-1.amazonaws.com
-docker build -t bridge .
-docker tag bridge:latest <ECR_URI>:latest
-docker push <ECR_URI>:latest
-```
-
-#### コスト試算（1日3時間 × 20日稼働の場合）
-
-| リソース | 月額概算 |
-| :--- | :--- |
-| RDS db.t3.micro | 約300円 |
-| ALB | 約400円 |
-| ECS Fargate | 約100円 |
-| VPC Endpoint × 2（shared_platform側） | 約60円 |
-| VPC Endpoint × 3（my_new_service側・Secret Manager、ECR用） | 約40円 |
-| EC2 t3.micro | 約20円 |
-| **合計** | **約900円** |
+**その他（2ファイル）**
+・`env/dev/terraform.tfvars`
+・`env/dev/terraform.tfbackend`（S3バックエンド設定。`bucket`・`key`・`region`・`dynamodb_table` を定義。`key` は `env/dev/terraform.tfstate`）
+・`Makefile`（`my_new_service/` 配下の Terraform 操作を対象に、`terraform init -backend-config=../env/dev/terraform.tfbackend` / `plan` / `apply` / `destroy` を `make` で実行できるよう共通化する）
 
 ---
 
 ### 完了条件（疎通確認仕様）
 
-本プロジェクトにおけるインフラ構築の完了は、ALB経由で以下の応答が得られることをもって定義する。
+本プロジェクトにおけるインフラ構築の完了は、以下が確認できることをもって定義する。
 
 1. **パスベースルーティングおよびDB接続確認**
     * **URL**: `[ALB-DNS]/api/v2/status`
@@ -367,3 +481,61 @@ docker push <ECR_URI>:latest
     * **URL**: `[ALB-DNS]/.env`
     * **期待値**: `403 Forbidden` または `404 Not Found`。
     * **検証目的**: Nginxの設定またはLaravelの配置が適切であり、機密情報ファイルへの外部アクセスが遮断されていることの確認。
+
+5. **Blue/Green デプロイの確認**
+    * デプロイワークフロー実行後、CodeDeploy のデプロイが `Succeeded` になり、本番リスナーのトラフィックが新リビジョン（green）へ切り替わっていること。テストリスナー経由で新リビジョンの `/api/v2/status` が `OK` を返すこと。
+
+6. **マイグレーション中断制御の確認**
+    * マイグレーションタスクの終了コードが 0 でない場合、デプロイが中断されること。
+
+7. **スケジュールスケーリングの確認**
+    * dev で `off-hours` 実行後に desired count が 0 になり、`on-hours` で 2 に戻ること。production で `off-hours`（0）を指定した場合にエラーで拒否されること。
+
+---
+
+### 練習環境のコスト最適化構成
+
+本問題を練習環境（個人のAWSアカウント）で実施する場合、以下の構成でコストを月2,000円以内に抑えることができる。**本番環境では適用しないこと。**
+
+#### 基本方針
+- 作業時間中のみ `terraform apply` し、終了後は必ず `terraform destroy` を実行する
+- dev は `ecs-scale.sh ... off-hours` で ECS を 0 台にし、Fargate 稼働費をさらに削減する
+- legacy_web（EC2）はNAT Gatewayを使わない設計のため、必要なパッケージを焼き込んだカスタムAMIを事前作成して使用する
+- ベースイメージは一度プッシュすれば再利用できるため、変更時のみ `101-base-build-*` を手動実行する
+- ECRへのイメージプッシュはローカルから手動で行うこともできる
+
+#### カスタムAMI作成手順
+
+NAT Gatewayを使わない設計のため、`legacy_web` EC2は起動時に `dnf install` でインターネットへアクセスできない。そのため必要なパッケージをあらかじめ焼き込んだカスタムAMIを事前に作成しておく必要がある。手順は以下の通り。
+
+1. **パブリックサブネットで一時EC2を起動**（Amazon Linux 2023、`t3.micro`）
+2. **パッケージをインストール**
+   ```bash
+   sudo dnf install -y httpd php php-mysqlnd mariadb105
+   ```
+3. **AWSコンソールからAMIを作成**（EC2 → インスタンス → アクション → イメージとテンプレート → イメージを作成）
+4. **一時EC2を終了**
+5. **作成したAMIのIDを `legacy_app.tf` の `ami` に指定する**
+
+#### ECS FargateのECRアクセス
+
+ECS FargateからECRへのイメージpullは、第３部で `my_new_service` 側に Secrets Manager 用および ECR 用 VPC Endpoint（ECR API・ECR DKR）を追加することで対応する。`shared_platform` のVPC Endpoint（S3・CloudWatch Logs）はそのまま共用できる。ECRへのイメージプッシュをローカルから手動で行う場合は以下の通り。
+
+```bash
+aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin <アカウントID>.dkr.ecr.ap-northeast-1.amazonaws.com
+docker build -t bridge .
+docker tag bridge:latest <ECR_URI>:latest
+docker push <ECR_URI>:latest
+```
+
+#### コスト試算（1日3時間 × 20日稼働の場合）
+
+| リソース | 月額概算 |
+| :--- | :--- |
+| RDS db.t3.micro | 約300円 |
+| ALB | 約400円 |
+| ECS Fargate（夜間0スケール込み） | 約80円 |
+| VPC Endpoint × 2（shared_platform側） | 約60円 |
+| VPC Endpoint × 3（my_new_service側・Secrets Manager、ECR用） | 約40円 |
+| EC2 t3.micro | 約20円 |
+| **合計** | **約900円** |
