@@ -122,36 +122,34 @@ curl http://<ALB-DNS>/
 
 **アプリケーション要件**
 
-・PHP 8.2 / Laravel 10系 / Alpine Linuxベース
-
-・Nginx + PHP-FPM（Port 8080 待機）
-
-・MySQL接続ドライバ、Composerインストール済み
+* PHP 8.2 / Laravel 10系 / Alpine Linuxベース
+* Nginx + PHP-FPM（Port 8080 待機）
+* MySQL接続ドライバ、Composerインストール済み
 
 **課題１：ベースイメージ（ランタイム層／専用リポジトリ）**
 
 複数サービスで共有する PHP ランタイムを、アプリ本体とは別の専用リポジトリで管理します。第４部のベースビルド用 Composite Action からビルド・プッシュできるようにすることが目的です。
 
-・**リポジトリ**: アプリ本体とは別の「コンテナ専用リポジトリ」（例: `project_bridge_container`）に置くこと。
-・**配置**: `docker/alpine/Dockerfile` という階層に配置すること（環境やディストリビューションごとに切り出せる規約とする）。
-・**内容**: Alpine ベースに、PHP 8.2、PHP-FPM、Nginx、MySQL 接続ドライバ（`pdo_mysql` 等）、Composer をインストール済みの状態にすること。アプリコードは含めず、ランタイムのみとすること。
-・**最適化**: `apk` キャッシュを同一レイヤー内で削除し、ビルドツールを残さないこと。
-・**タグ**: `base-build.conf` の `ECR_REPOSITORY` / `ECR_TAG` に従い、`:latest` と `:<short_hash>` の両方でプッシュする想定とすること（実際のプッシュは第４部の Composite Action が担当する）。
+* **リポジトリ**: アプリ本体とは別の「コンテナ専用リポジトリ」（例: `project_bridge_container`）に置くこと。
+* **配置**: `docker/alpine/Dockerfile` という階層に配置すること（環境やディストリビューションごとに切り出せる規約とする）。
+* **内容**: Alpine ベースに、PHP 8.2、PHP-FPM、Nginx、MySQL 接続ドライバ（`pdo_mysql` 等）、Composer をインストール済みの状態にすること。アプリコードは含めず、ランタイムのみとすること。
+* **最適化**: `apk` キャッシュを同一レイヤー内で削除し、ビルドツールを残さないこと。
+* **タグ**: `base-build.conf` の `ECR_REPOSITORY` / `ECR_TAG` に従い、`:latest` と `:<short_hash>` の両方でプッシュする想定とすること（実際のプッシュは第４部の Composite Action が担当する）。
 
 **課題２：アプリイメージ（アプリ層／環境別 Dockerfile）**
 
 ベースイメージを土台に、アプリコードを載せた実行イメージを定義します。
 
-・**配置**: `services/bridge/env/<environment>/Dockerfile`（環境ごとに差し替え可能）。ビルド時にサービスディレクトリ直下へコピーされる前提とすること。
-・**ベース指定**: `FROM <アカウントID>.dkr.ecr.ap-northeast-1.amazonaws.com/<base-repo>:<tag>`（課題１のベースイメージ）とすること。
-・**マルチステージ**: build ステージで `composer install --no-dev --optimize-autoloader`、production ステージで最小コピーとすること。
-・**アプリコード取り込み**: アプリソース用リポジトリから checkout される `services/bridge/src/` と、共通の `shared/` を取り込むこと。
-・**機密情報の完全分離**: Dockerfile 内に環境変数を焼き込まないこと。`config:cache` 等のビルド時制約を考慮した設計とすること。
-・**.dockerignore**: `.git`、ローカルの `.env`、`vendor` 等の不要なファイルがイメージに含まれないよう適切に設定すること。
-・**権限**: `storage`、`bootstrap/cache` への書き込み権限を付与し、`USER` 命令で非特権ユーザー（UID:1000 等）として実行すること。
-・**ポート**: Nginx を 8080 で待ち受けること。
-・**ヘルスチェック**: ALB ヘルスチェック（`/up` または `/health_check`）に応答すること。
-・**Nginx 設定**: `.env` 等の機密ファイルへの外部アクセスを遮断すること（該当パスへのリクエストに 403 または 404 を返すこと）。
+* **配置**: `services/bridge/env/<environment>/Dockerfile`（環境ごとに差し替え可能）。ビルド時にサービスディレクトリ直下へコピーされる前提とすること。
+* **ベース指定**: `FROM <アカウントID>.dkr.ecr.ap-northeast-1.amazonaws.com/<base-repo>:<tag>`（課題１のベースイメージ）とすること。
+* **マルチステージ**: build ステージで `composer install --no-dev --optimize-autoloader`、production ステージで最小コピーとすること。
+* **アプリコード取り込み**: アプリソース用リポジトリから checkout される `services/bridge/src/` と、共通の `shared/` を取り込むこと。
+* **機密情報の完全分離**: Dockerfile 内に環境変数を焼き込まないこと。`config:cache` 等のビルド時制約を考慮した設計とすること。
+* **.dockerignore**: `.git`、ローカルの `.env`、`vendor` 等の不要なファイルがイメージに含まれないよう適切に設定すること。
+* **権限**: `storage`、`bootstrap/cache` への書き込み権限を付与し、`USER` 命令で非特権ユーザー（UID:1000 等）として実行すること。
+* **ポート**: Nginx を 8080 で待ち受けること。
+* **ヘルスチェック**: ALB ヘルスチェック（`/up` または `/health_check`）に応答すること。
+* **Nginx 設定**: `.env` 等の機密ファイルへの外部アクセスを遮断すること（該当パスへのリクエストに 403 または 404 を返すこと）。
 
 ---
 
@@ -162,57 +160,64 @@ curl http://<ALB-DNS>/
 本セクションでは、Laravel アプリケーションを AWS Fargate（ECS）上で CodeDeploy Blue/Green により稼働させるためのリソースを定義します。
 
 **課題1：環境基盤と動的検索（provider.tf, data.tf, variables.tf）**
-・`terraform.workspace` を使い、dev と prd でリソース名が衝突しないように命名を動的に制御する。
-・VPC ID やサブネット ID を直書きせず、タグフィルタ（`Scope=SharedPlatform` や `Type=Private`）で data ソースから取得する。
-・既存の ALB リスナー ARN を variable で受け取り、data ソースで参照する。
+
+* `terraform.workspace` を使い、dev と prd でリソース名が衝突しないように命名を動的に制御する。
+* VPC ID やサブネット ID を直書きせず、タグフィルタ（`Scope=SharedPlatform` や `Type=Private`）で data ソースから取得する。
+* 既存の ALB リスナー ARN を variable で受け取り、data ソースで参照する。
 
 **課題2：セキュリティの「外付け」注入（network.tf）**
-・新規サービス用の ECS セキュリティグループ（SG）を作成する。
-・既存の RDS 用 SG の ID を data で取得し、`aws_security_group_rule` を用いて、新規サービス用 SG からの 3306 通信を許可するルールを「後付け」で追加する。
-・ECS タスクのアウトバウンド通信を制御し、不要な外部通信を制限すること。
-・ECS Fargate が ECR からイメージを pull できるよう、Secrets Manager（Interface型）、ECR API（Interface型）および ECR DKR（Interface型）の VPC Endpoint を `network.tf` 内に追加すること。`shared_platform` 側の VPC Endpoint（S3・CloudWatch Logs）はそのまま共用できるため追加不要。
+
+* 新規サービス用の ECS セキュリティグループ（SG）を作成する。
+* 既存の RDS 用 SG の ID を data で取得し、`aws_security_group_rule` を用いて、新規サービス用 SG からの 3306 通信を許可するルールを「後付け」で追加する。
+* ECS タスクのアウトバウンド通信を制御し、不要な外部通信を制限すること。
+* ECS Fargate が ECR からイメージを pull できるよう、Secrets Manager（Interface型）、ECR API（Interface型）および ECR DKR（Interface型）の VPC Endpoint を `network.tf` 内に追加すること。`shared_platform` 側の VPC Endpoint（S3・CloudWatch Logs）はそのまま共用できるため追加不要。
 
 **課題3：パスベースルーティングと Blue/Green 用リスナー（alb.tf）**
-・既存の共有 ALB に、パス `/api/v2/*` を受け持つリスナールールを追加する。
-・リスナールールの優先度（Priority）は variable で管理し、既存サービスと重ならないようにする。
-・HTTPS リスナー（443）を追加し、HTTP から HTTPS へのリダイレクト設定を行うこと。
-・ACM 証明書は DNS 検証を用いて発行すること。なお、DNS 検証レコードの実際の登録は省略してよい。`aws_acm_certificate` と `aws_acm_certificate_validation` の定義および `lifecycle { create_before_destroy = true }` の設定まで書けば合格とする。
-・Blue/Green 用のターゲットグループを2つ作成すること（例: `bridge-<env>-tg-blue` / `bridge-<env>-tg-green`、いずれも Port 8080、ヘルスチェック `/up` または `/health_check`）。
-・テストリスナーを追加すること（例: ポート 8443 等）。本番リスナー（443）とテストリスナーの ARN は CodeDeploy のデプロイグループから参照する。
-・本番リスナーの `/api/v2/*` ルールは初期状態で blue TG を向け、CodeDeploy が green への切替を行う前提とする。
+
+* 既存の共有 ALB に、パス `/api/v2/*` を受け持つリスナールールを追加する。
+* リスナールールの優先度（Priority）は variable で管理し、既存サービスと重ならないようにする。
+* HTTPS リスナー（443）を追加し、HTTP から HTTPS へのリダイレクト設定を行うこと。
+* ACM 証明書は DNS 検証を用いて発行すること。なお、DNS 検証レコードの実際の登録は省略してよい。`aws_acm_certificate` と `aws_acm_certificate_validation` の定義および `lifecycle { create_before_destroy = true }` の設定まで書けば合格とする。
+* Blue/Green 用のターゲットグループを2つ作成すること（例: `bridge-<env>-tg-blue` / `bridge-<env>-tg-green`、いずれも Port 8080、ヘルスチェック `/up` または `/health_check`）。
+* テストリスナーを追加すること（例: ポート 8443 等）。本番リスナー（443）とテストリスナーの ARN は CodeDeploy のデプロイグループから参照する。
+* 本番リスナーの `/api/v2/*` ルールは初期状態で blue TG を向け、CodeDeploy が green への切替を行う前提とする。
 
 **課題4：疎結合なシークレット管理（secrets.tf）**
-・AWS Secrets Manager を作成し、DB パスワードなどを格納する。
-・ECS のタスク定義内では、直接値を書かず、Secrets Manager の ARN を `valueFrom` で参照する。
+
+* AWS Secrets Manager を作成し、DB パスワードなどを格納する。
+* ECS のタスク定義内では、直接値を書かず、Secrets Manager の ARN を `valueFrom` で参照する。
 
 **課題5：ECS Fargate の構築（ecs.tf）**
-・ECS クラスター、タスク定義、サービスを構築する。
-・`deployment_controller { type = "CODE_DEPLOY" }` を設定する（Blue/Green 用）。
-・タスク定義には `lifecycle { ignore_changes = [cpu, memory] }` を設定し、運用の柔軟性を持たせる。スケジュールスケーリングおよび Auto Scaling との競合を避けるため、`desired_count` も `ignore_changes` の対象とすること。
-・コンテナ定義は `.json.tftpl` ファイルを `templatefile` 関数で読み込む形式にする。コンテナ名は `bridge`、ContainerPort は 8080 とすること。
-・CloudWatch Logs へのログ出力設定（awslogs ドライバ）を行うこと。
-・サービスの `desired_count` は2以上とし、可用性を確保すること。
-・Application Auto Scaling を用いて、CPU 使用率または ALB リクエスト数に応じたスケーリングを設定すること。
-・CloudWatch Alarm（CPU 使用率 70% 超過）を `ecs.tf` 内に定義すること。
-・マイグレーションは専用タスク定義を作らず、稼働中サービスの task definition を `aws ecs describe-services` で取得し、`command` を `php artisan migrate --force` で override した単発タスク（`run-task`）として実行する方式とすること（実行は第４部の CI/CD が担当する）。
-・シーディング（初期データ投入）はマイグレーションとは分離し、初回のみ手動で `aws ecs run-task`（`command` を `db:seed` に override）で実行すること。
+
+* ECS クラスター、タスク定義、サービスを構築する。
+* `deployment_controller { type = "CODE_DEPLOY" }` を設定する（Blue/Green 用）。
+* タスク定義には `lifecycle { ignore_changes = [cpu, memory] }` を設定し、運用の柔軟性を持たせる。スケジュールスケーリングおよび Auto Scaling との競合を避けるため、`desired_count` も `ignore_changes` の対象とすること。
+* コンテナ定義は `.json.tftpl` ファイルを `templatefile` 関数で読み込む形式にする。コンテナ名は `bridge`、ContainerPort は 8080 とすること。
+* CloudWatch Logs へのログ出力設定（awslogs ドライバ）を行うこと。
+* サービスの `desired_count` は2以上とし、可用性を確保すること。
+* Application Auto Scaling を用いて、CPU 使用率または ALB リクエスト数に応じたスケーリングを設定すること。
+* CloudWatch Alarm（CPU 使用率 70% 超過）を `ecs.tf` 内に定義すること。
+* マイグレーションは専用タスク定義を作らず、稼働中サービスの task definition を `aws ecs describe-services` で取得し、`command` を `php artisan migrate --force` で override した単発タスク（`run-task`）として実行する方式とすること（実行は第４部の CI/CD が担当する）。
+* シーディング（初期データ投入）はマイグレーションとは分離し、初回のみ手動で `aws ecs run-task`（`command` を `db:seed` に override）で実行すること。
 
 **課題6：CodeDeploy（codedeploy.tf）**
-・`aws_codedeploy_app`（compute platform: ECS）を作成する。名前は `deploy.conf` の `CODEDEPLOY_APP_NAME` と一致させること。
-・`aws_codedeploy_deployment_group`（ECS Blue/Green）を作成する。名前は `CODEDEPLOY_GROUP_NAME` と一致させること。
-　- `deployment_style` は `BLUE_GREEN` ／ `WITH_TRAFFIC_CONTROL`。
-　- `blue_green_deployment_config` で切替方式と旧タスク終了の待機時間を設定する。
-　- `load_balancer_info` / `ecs_service` で、課題3の blue/green ターゲットグループと本番・テストリスナー、課題5の ECS クラスタ／サービスを紐付ける。
-・`appspec.json` は CI/CD が動的生成する前提とし、Terraform では作成しない。
+
+* `aws_codedeploy_app`（compute platform: ECS）を作成する。名前は `deploy.conf` の `CODEDEPLOY_APP_NAME` と一致させること。
+* `aws_codedeploy_deployment_group`（ECS Blue/Green）を作成する。名前は `CODEDEPLOY_GROUP_NAME` と一致させること。
+  * `deployment_style` は `BLUE_GREEN` ／ `WITH_TRAFFIC_CONTROL`。
+  * `blue_green_deployment_config` で切替方式と旧タスク終了の待機時間を設定する。
+  * `load_balancer_info` / `ecs_service` で、課題3の blue/green ターゲットグループと本番・テストリスナー、課題5の ECS クラスタ／サービスを紐付ける。
+* `appspec.json` は CI/CD が動的生成する前提とし、Terraform では作成しない。
 
 **課題7：CI/CD 連携と各種ロール（resource_iam.tf, outputs.tf）**
-・ECS タスク実行ロール／タスクロール、CodeDeploy 用サービスロール、GitHub Actions OIDC 用ロールを定義する。
-・ECR リポジトリを2つ `aws_ecr_repository` として定義する（アプリイメージ用＝`deploy.conf` の `ECR_REPOSITORY`、ベースイメージ用＝`base-build.conf` の `ECR_REPOSITORY`）。
-・`outputs.tf` から以下を出力し、`deploy.conf` / `base-build.conf` に転記できるようにすること。
-　- `ecr_repository_uri`（アプリ用）、`base_ecr_repository_uri`（ベース用）
-　- `ecs_cluster_name`、`ecs_service_name`、`ecs_task_def_family`
-　- `codedeploy_app_name`、`codedeploy_deployment_group_name`
-　- `private_subnet_ids`（→ `VPC_SUBNETS`）、`ecs_security_group_id`（→ `VPC_SECURITY_GROUPS`）
+
+* ECS タスク実行ロール／タスクロール、CodeDeploy 用サービスロール、GitHub Actions OIDC 用ロールを定義する。
+* ECR リポジトリを2つ `aws_ecr_repository` として定義する（アプリイメージ用＝`deploy.conf` の `ECR_REPOSITORY`、ベースイメージ用＝`base-build.conf` の `ECR_REPOSITORY`）。
+* `outputs.tf` から以下を出力し、`deploy.conf` / `base-build.conf` に転記できるようにすること。
+  * `ecr_repository_uri`（アプリ用）、`base_ecr_repository_uri`（ベース用）
+  * `ecs_cluster_name`、`ecs_service_name`、`ecs_task_def_family`
+  * `codedeploy_app_name`、`codedeploy_deployment_group_name`
+  * `private_subnet_ids`（→ `VPC_SUBNETS`）、`ecs_security_group_id`（→ `VPC_SECURITY_GROUPS`）
 
 **ディレクトリ構成**
 ```
@@ -312,48 +317,53 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 操作ごとに独立した Composite Action（`runs.using: composite`）を作成する。AWS 認証はいずれも OIDC（`aws-actions/configure-aws-credentials`、`role-to-assume`）で行う。
 
 **`.github/actions/base-build/action.yml`（ベースイメージビルド）**
-・`inputs`: `environment` / `service` / `branch`（コンテナリポジトリのブランチ）/ `app_id` / `app_private_key`。
-・`actions/create-github-app-token` で一時トークンを生成 → `actions/checkout` でコンテナ専用リポジトリを checkout。
-・short hash 取得 → OIDC 認証 → `aws-actions/amazon-ecr-login`。
-・`prepare-base-build.sh` を実行して `ecr_repository` / `base_tag` / `registry` を取得。
-・`docker/setup-buildx-action` → `docker/build-push-action` で `docker/alpine` をビルドし、`:<base_tag>` と `:<short_hash>` の両方をプッシュ。キャッシュは `type=gha`。
+
+* `inputs`: `environment` / `service` / `branch`（コンテナリポジトリのブランチ）/ `app_id` / `app_private_key`。
+* `actions/create-github-app-token` で一時トークンを生成 → `actions/checkout` でコンテナ専用リポジトリを checkout。
+* short hash 取得 → OIDC 認証 → `aws-actions/amazon-ecr-login`。
+* `prepare-base-build.sh` を実行して `ecr_repository` / `base_tag` / `registry` を取得。
+* `docker/setup-buildx-action` → `docker/build-push-action` で `docker/alpine` をビルドし、`:<base_tag>` と `:<short_hash>` の両方をプッシュ。キャッシュは `type=gha`。
 
 **`.github/actions/build/action.yml`（アプリイメージビルド）**
-・`inputs`: `environment` / `service` / `branch`（アプリソースのブランチ）/ `app_id` / `app_private_key`。
-・`actions/create-github-app-token` で一時トークンを生成 → `actions/checkout` でアプリソース用リポジトリを `services/<service>/src` に checkout。
-・short hash 取得 → OIDC 認証 → `aws-actions/amazon-ecr-login`。
-・`prepare-docker-build.sh` を実行（`shared/` と env 別 `Dockerfile` をサービスディレクトリ直下へコピー）し、`ecr_repository` / `base_tag` / `registry` を取得。
-・`docker/build-push-action` でアプリイメージをビルドし、`:<base_tag>`（=latest 想定）と `:<short_hash>` の両方をプッシュ。
+
+* `inputs`: `environment` / `service` / `branch`（アプリソースのブランチ）/ `app_id` / `app_private_key`。
+* `actions/create-github-app-token` で一時トークンを生成 → `actions/checkout` でアプリソース用リポジトリを `services/<service>/src` に checkout。
+* short hash 取得 → OIDC 認証 → `aws-actions/amazon-ecr-login`。
+* `prepare-docker-build.sh` を実行（`shared/` と env 別 `Dockerfile` をサービスディレクトリ直下へコピー）し、`ecr_repository` / `base_tag` / `registry` を取得。
+* `docker/build-push-action` でアプリイメージをビルドし、`:<base_tag>`（=latest 想定）と `:<short_hash>` の両方をプッシュ。
 
 **`.github/actions/deploy/action.yml`（CodeDeploy Blue/Green デプロイ）**
-・`inputs`: `environment` / `service` / `deploy_tag`（デプロイするイメージタグ）。
-・OIDC 認証。
-・`prepare-ecs-deploy.sh` を実行し、`image_name` / `ecs_cluster` / `ecs_service` / `ecs_task_def` / `container_name` / `codedeploy_app` / `codedeploy_group` / `appspec_path` を取得（`appspec.json` を動的生成）。
-・`aws ecs describe-task-definition` で現行タスク定義を取得して JSON 化。
-・`aws-actions/amazon-ecs-render-task-definition` で `container_name` のイメージを `image_name` に差し替えた新タスク定義を生成。
-・`aws-actions/amazon-ecs-deploy-task-definition` で、生成タスク定義・`ecs_service`・`ecs_cluster`・`appspec_path`・`codedeploy_app`・`codedeploy_group` を指定し、`wait-for-service-stability: true` で CodeDeploy Blue/Green デプロイを実行。
+
+* `inputs`: `environment` / `service` / `deploy_tag`（デプロイするイメージタグ）。
+* OIDC 認証。
+* `prepare-ecs-deploy.sh` を実行し、`image_name` / `ecs_cluster` / `ecs_service` / `ecs_task_def` / `container_name` / `codedeploy_app` / `codedeploy_group` / `appspec_path` を取得（`appspec.json` を動的生成）。
+* `aws ecs describe-task-definition` で現行タスク定義を取得して JSON 化。
+* `aws-actions/amazon-ecs-render-task-definition` で `container_name` のイメージを `image_name` に差し替えた新タスク定義を生成。
+* `aws-actions/amazon-ecs-deploy-task-definition` で、生成タスク定義・`ecs_service`・`ecs_cluster`・`appspec_path`・`codedeploy_app`・`codedeploy_group` を指定し、`wait-for-service-stability: true` で CodeDeploy Blue/Green デプロイを実行。
 
 **`.github/actions/migration/action.yml`（マイグレーション）**
-・`inputs`: `environment` / `service` / `command`（JSON 配列）。
-・OIDC 認証 → `run-migration.sh "<service>" "<environment>" '<command>'` を実行。
-・スクリプト内では稼働中サービスの task definition を取得 → `command` を override して `run-task`（`assignPublicIp=DISABLED`、subnets / SG は conf）→ `wait tasks-stopped` → 終了コードを検証し、非 0 なら `::error::` で失敗させる。
+
+* `inputs`: `environment` / `service` / `command`（JSON 配列）。
+* OIDC 認証 → `run-migration.sh "<service>" "<environment>" '<command>'` を実行。
+* スクリプト内では稼働中サービスの task definition を取得 → `command` を override して `run-task`（`assignPublicIp=DISABLED`、subnets / SG は conf）→ `wait tasks-stopped` → 終了コードを検証し、非 0 なら `::error::` で失敗させる。
 
 **`.github/actions/scale/action.yml`（スケール変更）**
-・`inputs`: `environment` / `service` / `schedule_type`（`on-hours` / `off-hours` / `manual`）。
-・OIDC 認証 → `ecs-scale.sh "<service>" "<environment>" "<schedule_type>"` を実行。
-・スクリプト内で conf の対応する desired count を選び `aws ecs update-service --desired-count` を実行。production を 0 にできない安全弁を持つ。
+
+* `inputs`: `environment` / `service` / `schedule_type`（`on-hours` / `off-hours` / `manual`）。
+* OIDC 認証 → `ecs-scale.sh "<service>" "<environment>" "<schedule_type>"` を実行。
+* スクリプト内で conf の対応する desired count を選び `aws ecs update-service --desired-count` を実行。production を 0 にできない安全弁を持つ。
 
 **課題3：再利用可能ワークフローとトリガー**
 
 操作 Composite Action を呼び出す再利用可能ワークフロー（template）と、サービス・環境別のトリガーを用意する。
 
-・`base-build-template.yml`（`on: workflow_call`）: `inputs: service / environment / branch`、`secrets: inherit`。内部で base-build Action を呼ぶ。`permissions: { contents: read, id-token: write }`。
-・`base-build-bridge-dev.yml`（`on: workflow_dispatch`、`branch` 入力あり）: `uses: ./.github/workflows/base-build-template.yml` に `service: bridge` / `environment: develop` / `branch` を渡す。
-・`deploy-template.yml`（`on: workflow_call`）: デプロイ本体（課題4）。
-・`deploy-bridge-dev.yml`（`on: workflow_dispatch`）: `deploy-template.yml` を呼ぶ。
-・`scale-template.yml`（`on: workflow_call`）: scale Action を呼ぶ。
-・`scale-bridge-dev.yml`（`on: schedule` ＋ `workflow_dispatch`）: `scale-template.yml` を呼ぶ。
-・命名規約は `<操作>-template.yml`（再利用可能ワークフロー）と `<操作>-<service>-<env>.yml`（トリガー）とする。
+* `base-build-template.yml`（`on: workflow_call`）: `inputs: service / environment / branch`、`secrets: inherit`。内部で base-build Action を呼ぶ。`permissions: { contents: read, id-token: write }`。
+* `base-build-bridge-dev.yml`（`on: workflow_dispatch`、`branch` 入力あり）: `uses: ./.github/workflows/base-build-template.yml` に `service: bridge` / `environment: develop` / `branch` を渡す。
+* `deploy-template.yml`（`on: workflow_call`）: デプロイ本体（課題4）。
+* `deploy-bridge-dev.yml`（`on: workflow_dispatch`）: `deploy-template.yml` を呼ぶ。
+* `scale-template.yml`（`on: workflow_call`）: scale Action を呼ぶ。
+* `scale-bridge-dev.yml`（`on: schedule` ＋ `workflow_dispatch`）: `scale-template.yml` を呼ぶ。
+* 命名規約は `<操作>-template.yml`（再利用可能ワークフロー）と `<操作>-<service>-<env>.yml`（トリガー）とする。
 
 **課題4：デプロイワークフローの処理順序**
 
@@ -368,9 +378,10 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 **課題5：スケジュールスケーリング**
 
 `scale-template.yml` / `scale-bridge-dev.yml` と scale Action（課題2）、`ecs-scale.sh` で構成する。
-・トリガー `scale-bridge-dev.yml` は `on: schedule`（cron）で、平日朝に `on-hours`、夜間に `off-hours` を template へ渡して実行すること（JST は UTC 換算に注意）。`workflow_dispatch` で `manual` も選べるようにすること。
-・production を 0 台にしない安全弁を `ecs-scale.sh` 側で実装すること（`production` かつ `0` でエラー終了）。
-・dev は `OFF_HOURS_DESIRED_COUNT=0` でコスト最適化、production は2台以上を維持すること。
+
+* トリガー `scale-bridge-dev.yml` は `on: schedule`（cron）で、平日朝に `on-hours`、夜間に `off-hours` を template へ渡して実行すること（JST は UTC 換算に注意）。`workflow_dispatch` で `manual` も選べるようにすること。
+* production を 0 台にしない安全弁を `ecs-scale.sh` 側で実装すること（`production` かつ `0` でエラー終了）。
+* dev は `OFF_HOURS_DESIRED_COUNT=0` でコスト最適化、production は2台以上を維持すること。
 
 ---
 
@@ -442,69 +453,78 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 #### 成果物（全47ファイル想定）
 
 **第１部：shared_platform（8ファイル）**
-・`shared_platform/main.tf`
-・`shared_platform/vpc.tf`
-・`shared_platform/security_groups.tf`
-・`shared_platform/alb.tf`
-・`shared_platform/network_ext.tf`
-・`shared_platform/rds.tf`
-・`shared_platform/legacy_app.tf`
-・`shared_platform/outputs.tf`
+
+* `shared_platform/main.tf`
+* `shared_platform/vpc.tf`
+* `shared_platform/security_groups.tf`
+* `shared_platform/alb.tf`
+* `shared_platform/network_ext.tf`
+* `shared_platform/rds.tf`
+* `shared_platform/legacy_app.tf`
+* `shared_platform/outputs.tf`
 
 **第２部：コンテナ関連（4ファイル）**
-・ベースイメージ `docker/alpine/Dockerfile`（コンテナ専用リポジトリ）
-・アプリイメージ `services/bridge/env/develop/Dockerfile`
-・`.dockerignore`
-・`shared/`（共通コード一式）
+
+* ベースイメージ `docker/alpine/Dockerfile`（コンテナ専用リポジトリ）
+* アプリイメージ `services/bridge/env/develop/Dockerfile`
+* `.dockerignore`
+* `shared/`（共通コード一式）
 
 **第３部：Terraform 関連（11ファイル）**
-・`my_new_service/provider.tf`
-・`my_new_service/variables.tf`
-・`my_new_service/data.tf`
-・`my_new_service/network.tf`
-・`my_new_service/alb.tf`
-・`my_new_service/secrets.tf`
-・`my_new_service/ecs.tf`
-・`my_new_service/codedeploy.tf`
-・`my_new_service/resource_iam.tf`
-・`my_new_service/outputs.tf`
-・`my_new_service/container_def.json.tftpl`
+
+* `my_new_service/provider.tf`
+* `my_new_service/variables.tf`
+* `my_new_service/data.tf`
+* `my_new_service/network.tf`
+* `my_new_service/alb.tf`
+* `my_new_service/secrets.tf`
+* `my_new_service/ecs.tf`
+* `my_new_service/codedeploy.tf`
+* `my_new_service/resource_iam.tf`
+* `my_new_service/outputs.tf`
+* `my_new_service/container_def.json.tftpl`
 
 **Laravelアプリケーション関連（3ファイル）**
-・`database/migrations/xxxx_xx_xx_create_products_table.php`
-・`database/seeders/ProductSeeder.php`
-・`routes/api.php`
+
+* `database/migrations/xxxx_xx_xx_create_products_table.php`
+* `database/seeders/ProductSeeder.php`
+* `routes/api.php`
 
 **設定ファイル（2ファイル）**
-・`services/bridge/env/develop/base-build.conf`
-・`services/bridge/env/develop/deploy.conf`
+
+* `services/bridge/env/develop/base-build.conf`
+* `services/bridge/env/develop/deploy.conf`
 
 **CI/CD - Composite Action（5ファイル）**
-・`.github/actions/base-build/action.yml`
-・`.github/actions/build/action.yml`
-・`.github/actions/deploy/action.yml`
-・`.github/actions/migration/action.yml`
-・`.github/actions/scale/action.yml`
+
+* `.github/actions/base-build/action.yml`
+* `.github/actions/build/action.yml`
+* `.github/actions/deploy/action.yml`
+* `.github/actions/migration/action.yml`
+* `.github/actions/scale/action.yml`
 
 **CI/CD - スクリプト（5ファイル）**
-・`.github/scripts/prepare-base-build.sh`
-・`.github/scripts/prepare-docker-build.sh`
-・`.github/scripts/prepare-ecs-deploy.sh`
-・`.github/scripts/run-migration.sh`
-・`.github/scripts/ecs-scale.sh`
+
+* `.github/scripts/prepare-base-build.sh`
+* `.github/scripts/prepare-docker-build.sh`
+* `.github/scripts/prepare-ecs-deploy.sh`
+* `.github/scripts/run-migration.sh`
+* `.github/scripts/ecs-scale.sh`
 
 **CI/CD - ワークフロー（6ファイル）**
-・`.github/workflows/base-build-template.yml`
-・`.github/workflows/base-build-bridge-dev.yml`
-・`.github/workflows/deploy-template.yml`
-・`.github/workflows/deploy-bridge-dev.yml`
-・`.github/workflows/scale-template.yml`
-・`.github/workflows/scale-bridge-dev.yml`
+
+* `.github/workflows/base-build-template.yml`
+* `.github/workflows/base-build-bridge-dev.yml`
+* `.github/workflows/deploy-template.yml`
+* `.github/workflows/deploy-bridge-dev.yml`
+* `.github/workflows/scale-template.yml`
+* `.github/workflows/scale-bridge-dev.yml`
 
 **その他（3ファイル）**
-・`env/dev/terraform.tfvars`
-・`env/dev/terraform.tfbackend`（S3バックエンド設定。`bucket`・`key`・`region`・`dynamodb_table` を定義。`key` は `env/dev/terraform.tfstate`）
-・`Makefile`（`my_new_service/` 配下の Terraform 操作を対象に、`terraform init -backend-config=../env/dev/terraform.tfbackend` / `plan` / `apply` / `destroy` を `make` で実行できるよう共通化する）
+
+* `env/dev/terraform.tfvars`
+* `env/dev/terraform.tfbackend`（S3バックエンド設定。`bucket`・`key`・`region`・`dynamodb_table` を定義。`key` は `env/dev/terraform.tfstate`）
+* `Makefile`（`my_new_service/` 配下の Terraform 操作を対象に、`terraform init -backend-config=../env/dev/terraform.tfbackend` / `plan` / `apply` / `destroy` を `make` で実行できるよう共通化する）
 
 ---
 
