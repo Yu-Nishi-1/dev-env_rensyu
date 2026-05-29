@@ -121,8 +121,11 @@ curl http://<ALB-DNS>/
 新規サービス bridge を動かす、軽量でセキュアなコンテナイメージを「ベースイメージ」と「アプリイメージ」の二層で定義してください。すべて Alpine Linux ベースとします。
 
 **アプリケーション要件**
+
 ・PHP 8.2 / Laravel 10系 / Alpine Linuxベース
+
 ・Nginx + PHP-FPM（Port 8080 待機）
+
 ・MySQL接続ドライバ、Composerインストール済み
 
 **課題１：ベースイメージ（ランタイム層／専用リポジトリ）**
