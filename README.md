@@ -450,7 +450,122 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 
 ---
 
-#### 成果物（全47ファイル想定）
+#### 第５部：大規模運用・観測性・セキュリティ深掘りへのシステム拡張
+
+> **前提**: 第１部〜第４部で構築した `shared_platform/` および `my_new_service/`、ならびにデプロイ運用モノレポを土台として、システム構成そのものを本番運用水準へ拡張する。第１部〜第４部の構成を出発点とし、本セクションでは既存リソース（ECS サービス・タスク定義・IAM ロール・ALB・クラスタ等）を**直接改修してよい**。Service Connect 対応や容量プロバイダーの導入、タスクロールの最小権限化など、既存定義の書き換えを伴う変更を含む。状態管理は引き続き S3 バックエンド＋DynamoDB ロックを用いる（`my_new_service` の state をそのまま継続利用してよい）。
+
+本セクションでは、稼働中の bridge を「複数サービスが相互通信し、本番運用に耐えるプラットフォーム」へ発展させる。サービス間通信（Service Connect）、分散トレース（X-Ray）、ログ分析（OpenSearch）、脅威検知（GuardDuty / Inspector）、境界防御（WAF v2）、ヘルスチェックの精緻化、容量配分（Fargate Spot）を、第３部の `my_new_service/` を中心に組み込む。第３部の各ファイル（`ecs.tf`・`resource_iam.tf`・`alb.tf`・`network.tf` 等）への加筆・改修を前提とし、第５部で新規追加するリソースは原則 `my_new_service/` 配下の新規 `.tf` ファイルとして同一 state に載せる。
+
+> **注記（問題構成上の扱い）**: 第１部〜第４部の課題文・ディレクトリ構成・成果物リストは練習問題の出発点として固定する。第５部は、その出発点に対してシステム構成を変更・拡張する設計課題である。したがって第３部の `ecs.tf` 等を書き換える指示が本セクションに含まれる。
+
+**追加の技術的制約および遂行基準**
+
+* **既存定義の改修を許容**: 第３部の ECS サービス・タスク定義・IAM ロール・ALB リスナー等を直接書き換えてよい。Service Connect・容量プロバイダー・ヘルスチェック調整は既存リソースへの加筆として実装すること。
+* **workspace 継承**: 第３部同様 `terraform.workspace`（dev / prd）で命名を制御すること。
+* **サービスメッシュ選定**: App Mesh ではなく **ECS Service Connect** を第一選択とすること（Envoy サイドカーを ECS が自動管理し運用負荷が低いため）。App Mesh を採用しない理由をコメントに明記すること。
+* **観測性の三本柱**: 第３部の CloudWatch Logs / Alarm を土台に、分散トレース（X-Ray）とログ分析（OpenSearch）を加えて三本柱を完成させること。
+* **機密と設定の分離**: 機密値は Secrets Manager、非機密の環境依存値は SSM Parameter Store に置き、タスク定義の `secrets`（`valueFrom`）で動的注入すること。使い分け方針を明記すること。
+* **最小権限**: 第３部のタスクロール／実行ロールを最小権限へ改修すること。`Resource` を ARN 単位、`Action` を実使用分のみに限定し `*` 権限を排除し、各ステートメントに用途コメントを付すこと。
+* **容量配分**: ECS サービスを `FARGATE` / `FARGATE_SPOT` の容量プロバイダー戦略（`base` / `weight`）に切り替え、env（dev / prd）ごとに Spot 比率を変えること。production は `base` により最小2タスクの可用性を担保すること。`deployment_controller = CODE_DEPLOY` との整合に注意すること。
+* **コミットメント**: Savings Plans は実購入せず、損益分岐と併用方針の判断ドキュメントのみとすること。
+* **コスト安全弁**: 高コスト要素（OpenSearch・追加クラスタ・WAF）は dev で最小構成・短時間運用とし、`production` を 0 台にしない安全弁（第４部 `ecs-scale.sh`）を継承すること。適用日は当日中に `destroy` すること。
+
+**課題1：サービス間通信と容量配分（ecs.tf の改修 ＋ service_connect.tf, capacity_provider.tf, multi_cluster.tf）**
+
+* `ecs.tf`（改修）: 既存の ECS サービスに `service_connect_configuration` を追加し、bridge を Service Connect 対応にする。あわせて起動方式を容量プロバイダー戦略（`capacity_provider_strategy`）へ切り替える（従来の `launch_type = FARGATE` 相当を `FARGATE` / `FARGATE_SPOT` の配分に置き換える）。`deployment_controller = CODE_DEPLOY` を維持したまま整合させること。
+* `service_connect.tf`（新規）: AWS Cloud Map 名前空間（例: `bridge.local`）を作成し、bridge を `client-server` モードで登録する（ポート 8080）。他サービスから `http://bridge:8080` で名前解決できること。検証用のダミークライアントタスク（curl ループ）を1つ追加してよい。
+* `capacity_provider.tf`（新規）: クラスタに `FARGATE` と `FARGATE_SPOT` を関連付け、`default_capacity_provider_strategy` で `base` / `weight` を設定する（例: dev は FARGATE base=1 / FARGATE_SPOT weight=4、prd は Spot 比率を抑える）。Spot 中断時も `base` により最小2タスクが崩れない配分とし、中断ハンドリングの考え方をコメントで記述する。
+* `multi_cluster.tf`（新規）: 第３部クラスタとは別に追加 ECS クラスタを最低1つ作成し、容量プロバイダーを関連付ける。クラスタの使い分け方針（本番系 / バッチ系等）を `outputs.tf` コメントで説明する。
+
+**課題2：高度な観測性（container_def.json.tftpl の改修 ＋ xray.tf, container_insights.tf, opensearch.tf, log_subscription.tf）**
+
+* `container_def.json.tftpl`（改修）: ADOT（AWS Distro for OpenTelemetry）collector のサイドカーコンテナを追加し、アプリのトレースを X-Ray へ送出する構成にする。`bridge` 本体コンテナと collector の依存関係（`dependsOn`）を整合させること。
+* `xray.tf`（新規）: X-Ray 送出に必要な権限を整える（タスクロールに `AWSXRayDaemonWriteAccess` 相当を最小権限で付与。`resource_iam.tf` 側で付与してもよい）。
+* `container_insights.tf`（新規）: クラスタの Container Insights を有効化し enhanced observability（拡張メトリクス）を設定する。第３部クラスタ・課題1の追加クラスタの双方で有効化する方針を明記する。
+* `opensearch.tf`（新規）: OpenSearch Service ドメインを最小構成（`t3.small.search` 1ノード、単一 AZ、dev 限定）で作成する。`deletion_protection = false`、保持短期とする。
+* `log_subscription.tf`（新規）: 第３部で作成済みの CloudWatch Logs ロググループにサブスクリプションフィルタを追加し、Lambda（または Firehose）経由で OpenSearch へログを取り込む。取り込み用 IAM ロールは最小権限とする。
+* Laravel 側のトレース送出設定（OTLP エクスポータ等）はアプリソース用リポジトリに追加する。
+
+**課題3：セキュリティ深掘り（resource_iam.tf / secrets.tf / container_def.json.tftpl の改修 ＋ ssm_parameters.tf, guardduty.tf, inspector.tf, waf_v2.tf）**
+
+* `ssm_parameters.tf`（新規）: DB ホスト等の非機密だが環境依存の値を SSM Parameter Store（`SecureString` も併用）に格納する。
+* `container_def.json.tftpl`（改修）: タスク定義の `secrets`（`valueFrom`）に SSM Parameter Store と Secrets Manager の両方を参照させ、機密（Secrets Manager）と設定値（SSM）を動的注入する。使い分け方針を明記する。
+* `secrets.tf`（改修）: Secrets Manager にローテーション設定（または手動ローテーションの設計）を追加し、再デプロイなしで最新値を取得できる方式を記述する。
+* `resource_iam.tf`（改修）: 第３部のタスクロール／実行ロールを最小権限へ書き換える。`Resource` を ARN 単位、`Action` を実使用分のみに限定し、`*` 権限を排除して各ステートメントに用途コメントを付す。SSM Parameter Store・X-Ray・Secrets Manager への必要権限もここで最小限に付与する。
+* `guardduty.tf`（新規）: GuardDuty を有効化し ECS Runtime Monitoring（検出器の有効化）を構成する。検出結果の通知先 SNS を最小構成で用意してよい。
+* `inspector.tf`（新規）: Inspector v2 を有効化し、ECR イメージスキャンと EC2（第１部 legacy）スキャンを対象に含める。第３部 ECR への適用とする。
+* `waf_v2.tf`（新規）: 共有 ALB（または bridge の HTTPS リスナー）に WebACL を関連付ける。AWS マネージドルール（Common Rule Set / Known Bad Inputs / SQLi）＋レートベースルール（例: 5分あたり一定数超でブロック）を設定し `/api/v2/*` を保護する。
+
+**課題4：アプリ連携の精緻化（alb.tf / ecs.tf / container_def.json.tftpl の改修）**
+
+* `alb.tf`（改修）: Blue/Green 用ターゲットグループの浅い liveness（`/up`）について `interval` / `timeout` / `healthy_threshold` / `unhealthy_threshold` を明示的にチューニングする。
+* `container_def.json.tftpl`（改修）: コンテナ HEALTHCHECK（`healthCheck`、`CMD-SHELL` で localhost:8080）に `startPeriod` を起動時間に合わせて設定する。OPcache / `config:cache` / `route:cache` の活用によるブート短縮、イメージレイヤーの最小化（第２部の二層化前提で差分最小）、`stopTimeout` と graceful shutdown の整合を反映し、起動時間を最適化する。アプリ readiness（DB 接続を含む深いチェック）は `/api/v2/status` を流用する。
+* `ecs.tf`（改修）: ECS サービスの `health_check_grace_period_seconds` を起動〜マイグレーション反映までの猶予を考慮して設定する。テストリスナー経由の検証が readiness 成立後に本番切替されるよう、ヘルスチェック閾値と CodeDeploy（課題6 / 第３部）の待機設定を整合させる。
+
+**課題5：コスト最適化（capacity_provider.tf の発展 ＋ spot_strategy.tf, savings_plans.md）**
+
+* `capacity_provider.tf`（課題1から発展）: `FARGATE` / `FARGATE_SPOT` の `base` / `weight` をコスト最適側に配分する。production は Spot 比率を抑え dev は上げる方針を `variables.tf` で env 別に切り替える。
+* `spot_strategy.tf`（新規）: Spot 中断時の挙動（タスク再配置、`base` による最低稼働担保）を設計し、可用性（最小2タスク）が崩れない配分を表現する。中断ハンドリングの考え方をコメントで記述する。
+* `savings_plans.md`（新規）: Compute / EC2 Instance Savings Plans の違いと Fargate への適用関係、dev/prd の稼働パターンからの損益分岐試算（1年/3年、No/Partial/All Upfront）、Spot との併用方針（ベースライン分を Savings Plans、バースト分を Spot/オンデマンド）を記述する。実購入は行わない。
+
+**課題6：CI/CD への組み込み（deploy-template.yml の改修 ＋ ops-apply ワークフロー）**
+
+* 第４部の deploy パイプライン（`deploy-template.yml`）は、ADOT サイドカー入りの新タスク定義・容量プロバイダー戦略・最小権限ロールを前提に動作するよう必要に応じて調整する（タスク定義レンダリングが新コンテナ定義を反映すること）。
+* `ops-apply-template.yml`（新規、`on: workflow_call`）: 第５部で追加した観測性・セキュリティ系リソース（GuardDuty / Inspector / WAF / OpenSearch 等）の `terraform apply` を行う再利用可能ワークフロー。`inputs: service / environment`、`secrets: inherit`、`permissions: { contents: read, id-token: write }`。
+* `ops-apply-bridge-dev.yml`（新規、`on: workflow_dispatch`）: `service: bridge` / `environment: develop` を渡す。AWS 認証は OIDC。
+
+**ディレクトリ構成（第５部での追加・改修）**
+
+第３部 `my_new_service/` に対する加筆・改修と新規ファイルを示す（★＝新規、◇＝既存ファイルの改修）。
+
+```
+my_new_service/
+├── ecs.tf                   # ◇ service_connect_configuration 追加・容量プロバイダー戦略へ切替・grace period 設定
+├── alb.tf                   # ◇ ヘルスチェック閾値のチューニング
+├── secrets.tf               # ◇ ローテーション設定の追加
+├── resource_iam.tf          # ◇ タスク/実行ロールの最小権限化・X-Ray/SSM/Secrets 権限付与
+├── container_def.json.tftpl # ◇ ADOT サイドカー追加・secrets(valueFrom) 拡張・HEALTHCHECK/起動最適化
+├── service_connect.tf       # ★【課題1】Service Connect 名前空間・サービス検出
+├── capacity_provider.tf     # ★【課題1/5】容量プロバイダー戦略（FARGATE / FARGATE_SPOT）
+├── multi_cluster.tf         # ★【課題1】追加 ECS クラスタと配置戦略
+├── xray.tf                  # ★【課題2】X-Ray 関連設定
+├── container_insights.tf    # ★【課題2】Container Insights 詳細設定
+├── opensearch.tf            # ★【課題2】OpenSearch ドメイン
+├── log_subscription.tf      # ★【課題2】CloudWatch Logs サブスクリプションフィルタ → OpenSearch
+├── ssm_parameters.tf        # ★【課題3】SSM Parameter Store（設定値の動的注入）
+├── guardduty.tf             # ★【課題3】GuardDuty 有効化
+├── inspector.tf             # ★【課題3】Inspector v2（ECR / EC2 スキャン）
+├── waf_v2.tf                # ★【課題3】WAF v2（マネージドルール＋レートベース）
+├── spot_strategy.tf         # ★【課題5】Spot 中断対応・base/weight 設計
+└── savings_plans.md         # ★【課題5】Savings Plans コミット戦略（購入は手動・判断ドキュメント）
+
+.github/
+└── workflows/
+    ├── deploy-template.yml          # ◇【課題6】新タスク定義・容量プロバイダー・最小権限を前提に調整
+    ├── ops-apply-template.yml       # ★【課題6】観測性・セキュリティ系リソースの apply（on: workflow_call）
+    └── ops-apply-bridge-dev.yml     # ★【課題6】トリガー（workflow_dispatch）
+```
+
+**完了条件（第５部）**
+
+第１部〜第４部の完了条件（既存の完了条件1〜7）を**すべて満たしたまま**（システム改修後も `/`・`/api/v2/status`・`/api/v2/products`・`/.env` の 403/404・Blue/Green の `Succeeded` が維持されること）、以下が追加で確認できること。
+
+1. **サービス検出の確認**: ダミークライアントタスクから `http://bridge:8080/api/v2/status` が名前解決経由で `{"service":"bridge","database":"OK"}` を返すこと（課題1）。
+2. **容量配分の確認**: bridge のタスクの一部が `FARGATE_SPOT` で起動していること（`aws ecs describe-tasks` の `capacityProviderName` で確認）。env 別（dev / prd）で Spot 比率が切り替わること（課題1 / 課題5）。
+3. **分散トレースの確認**: X-Ray コンソールに bridge のサービスマップが表示され、`/api/v2/status` のトレースに RDS へのセグメントが含まれること（課題2）。
+4. **ログ分析の確認**: OpenSearch Dashboards で bridge のアプリログが検索・表示できること（課題2）。
+5. **動的注入の確認**: タスク定義の `secrets` に SSM Parameter Store 由来の値が注入され、`/api/v2/status` が引き続き `OK` を返すこと（課題3）。
+6. **脅威検知の確認**: GuardDuty 検出器が有効で、Inspector が ECR イメージをスキャンしていること（findings 表示）（課題3）。
+7. **境界防御の確認**: WAF v2 の WebACL が ALB に関連付き、レートベースルール超過時にブロックが発生すること（課題3）。
+8. **最小権限の確認**: タスクロール／実行ロールに `*` 権限が存在しないこと（ポリシー JSON レビュー）（課題3）。
+9. **ヘルス整合の確認**: タスク起動後 `startPeriod` 内は unhealthy 判定されず、readiness 成立後にトラフィックを受けること。Blue/Green で readiness 成立まで本番切替が行われないこと（課題4）。
+10. **起動最適化の確認**: タスク RUNNING → ALB healthy の時間が最適化前より短縮されていること（before/after を記録）（課題4）。
+11. **コミット戦略の確認**: `savings_plans.md` に損益分岐の試算と Spot 併用方針が記述されていること（課題5）。
+12. **パイプライン整合の確認**: `deploy-template.yml` 経由のデプロイが ADOT サイドカー入りの新タスク定義・容量プロバイダー戦略・最小権限ロールを反映して `Succeeded` し、`ops-apply-bridge-dev.yml` から観測性・セキュリティ系リソースが apply できること（課題6）。
+
+---
+
+#### 成果物（全62ファイル想定）
 
 **第１部：shared_platform（8ファイル）**
 
@@ -490,12 +605,14 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 * `database/seeders/ProductSeeder.php`
 * `routes/api.php`
 
-**設定ファイル（2ファイル）**
+**第４部：デプロイ運用モノレポと CI/CD（18ファイル）**
+
+設定ファイル（2ファイル）
 
 * `services/bridge/env/develop/base-build.conf`
 * `services/bridge/env/develop/deploy.conf`
 
-**CI/CD - Composite Action（5ファイル）**
+Composite Action（5ファイル）
 
 * `.github/actions/base-build/action.yml`
 * `.github/actions/build/action.yml`
@@ -503,7 +620,7 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 * `.github/actions/migration/action.yml`
 * `.github/actions/scale/action.yml`
 
-**CI/CD - スクリプト（5ファイル）**
+スクリプト（5ファイル）
 
 * `.github/scripts/prepare-base-build.sh`
 * `.github/scripts/prepare-docker-build.sh`
@@ -511,7 +628,7 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 * `.github/scripts/run-migration.sh`
 * `.github/scripts/ecs-scale.sh`
 
-**CI/CD - ワークフロー（6ファイル）**
+ワークフロー（6ファイル）
 
 * `.github/workflows/base-build-template.yml`
 * `.github/workflows/base-build-bridge-dev.yml`
@@ -525,6 +642,32 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 * `env/dev/terraform.tfvars`
 * `env/dev/terraform.tfbackend`（S3バックエンド設定。`bucket`・`key`・`region`・`dynamodb_table` を定義。`key` は `env/dev/terraform.tfstate`）
 * `Makefile`（`my_new_service/` 配下の Terraform 操作を対象に、`terraform init -backend-config=../env/dev/terraform.tfbackend` / `plan` / `apply` / `destroy` を `make` で実行できるよう共通化する）
+
+---
+
+**第５部：システム拡張（新規15ファイル）**
+
+第５部は第３部 `my_new_service/` の同一 state に載せる。第１部〜第４部の成果物（上記 47 ファイル）に対し、以下の**新規15ファイルを追加**する（合計 62 ファイル）。
+
+* `my_new_service/service_connect.tf`【課題1】
+* `my_new_service/capacity_provider.tf`【課題1/5】
+* `my_new_service/multi_cluster.tf`【課題1】
+* `my_new_service/xray.tf`【課題2】
+* `my_new_service/container_insights.tf`【課題2】
+* `my_new_service/opensearch.tf`【課題2】
+* `my_new_service/log_subscription.tf`【課題2】
+* `my_new_service/ssm_parameters.tf`【課題3】
+* `my_new_service/guardduty.tf`【課題3】
+* `my_new_service/inspector.tf`【課題3】
+* `my_new_service/waf_v2.tf`【課題3】
+* `my_new_service/spot_strategy.tf`【課題5】
+* `my_new_service/savings_plans.md`【課題5・判断ドキュメント】
+* `.github/workflows/ops-apply-template.yml`【課題6】
+* `.github/workflows/ops-apply-bridge-dev.yml`【課題6】
+
+あわせて、以下の既存ファイルを改修する（いずれも既存ファイルのため上記の総数には加算しない）。`my_new_service/ecs.tf`（Service Connect 設定・容量プロバイダー戦略・grace period）、`my_new_service/alb.tf`（ヘルスチェック閾値のチューニング）、`my_new_service/secrets.tf`（ローテーション設定の追加）、`my_new_service/resource_iam.tf`（タスク/実行ロールの最小権限化・X-Ray/SSM/Secrets 権限付与）、`my_new_service/container_def.json.tftpl`（ADOT サイドカー追加・secrets 拡張・HEALTHCHECK/起動最適化）、`.github/workflows/deploy-template.yml`（新タスク定義・容量プロバイダー・最小権限を前提に調整）の6ファイル。
+
+> アプリソース用リポジトリ側に追加する X-Ray トレース送出設定（OTLP エクスポータ等）は上記の本数に含めない。第１部〜第４部の 47 ファイルに第５部の新規15ファイルを加えて**全62ファイル**となり、これに加えて既存6ファイルを改修する。
 
 ---
 
