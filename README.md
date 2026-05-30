@@ -125,7 +125,7 @@ curl http://<ALB-DNS>/
 * **配置**: `services/bridge/env/<environment>/Dockerfile`（環境ごとに差し替え可能）。ビルド時にサービスディレクトリ直下へコピーされる前提とすること。
 * **ベース指定**: `FROM <アカウントID>.dkr.ecr.ap-northeast-1.amazonaws.com/<base-repo>:<tag>`（課題１のベースイメージ）とすること。
 * **マルチステージ**: build ステージで `composer install --no-dev --optimize-autoloader`（PHP の依存解決）、production ステージで最小コピーとすること。Composer はビルド時のみ使用し、production イメージには残さないこと。
-* **アプリコード取り込み**: アプリソース用リポジトリ（`dev-env_rensyu-app`）から checkout される `services/bridge/src/`（素の PHP アプリ一式：エンドポイント・自作 CLI・`migrations/*.sql`・`composer.json`）と、共通の `shared/` を取り込むこと。
+* **アプリコード取り込み**: アプリソース用リポジトリ（`dev-env_rensyu-app`）から checkout される `services/bridge/src/`（素の PHP アプリ一式：エンドポイント・自作 CLI・`migrations/*.sql`・`seeds/*.sql`・`composer.json`）と、共通の `shared/` を取り込むこと。
 * **機密情報の完全分離**: Dockerfile 内に環境変数を焼き込まないこと。接続先は実行時に環境変数で注入する設計とすること（フレームワーク固有のビルド時キャッシュには依存しない）。
 * **.dockerignore**: `.git`、ローカルの `.env`、`vendor` 等の不要なファイルがイメージに含まれないよう適切に設定すること。
 * **権限**: アプリが書き込む必要のあるディレクトリ（例: `var/`・`tmp/` 等のキャッシュ／ログ用）にのみ書込権限を付与し、`USER` 命令で非特権ユーザー（UID:1000 等）として実行すること。
@@ -506,7 +506,7 @@ VPC_SECURITY_GROUPS=<ecs sg id>
 **課題4：アプリ連携の精緻化（alb.tf / ecs.tf / container_def.json.tftpl の改修）**
 
 * `alb.tf`（改修）: Blue/Green 用ターゲットグループの浅い liveness（`/up`）について `interval` / `timeout` / `healthy_threshold` / `unhealthy_threshold` を明示的にチューニングする。
-* `container_def.json.tftpl`（改修）: コンテナ HEALTHCHECK（`healthCheck`、`CMD-SHELL` で localhost:8080）に `startPeriod` を起動時間に合わせて設定する。OPcache / `config:cache` / `route:cache` の活用によるブート短縮、イメージレイヤーの最小化（第２部の二層化前提で差分最小）、`stopTimeout` と graceful shutdown の整合を反映し、起動時間を最適化する。アプリ readiness（DB 接続を含む深いチェック）は `/api/v2/status` を流用する。
+* `container_def.json.tftpl`（改修）: コンテナ HEALTHCHECK（`healthCheck`、`CMD-SHELL` で localhost:8080）に `startPeriod` を起動時間に合わせて設定する。OPcache の活用によるブート短縮、イメージレイヤーの最小化（第２部の二層化前提で差分最小）、`stopTimeout` と graceful shutdown の整合を反映し、起動時間を最適化する。アプリ readiness（DB 接続を含む深いチェック）は `/api/v2/status` を流用する。
 * `ecs.tf`（改修）: ECS サービスの `health_check_grace_period_seconds` を起動〜マイグレーション反映までの猶予を考慮して設定する。テストリスナー経由の検証が readiness 成立後に本番切替されるよう、ヘルスチェック閾値と CodeDeploy（課題6 / 第３部）の待機設定を整合させる。
 
 **課題5：コスト最適化さらに上（capacity_provider.tf の発展 ＋ spot_strategy.tf, savings_plans.md）**
@@ -704,7 +704,7 @@ dev-env_rensyu/
 - dev は scale Action（`off-hours`）で ECS を 0 台にし、Fargate 稼働費をさらに削減する
 - legacy_web（EC2）はNAT Gatewayを使わない設計のため、必要なパッケージを焼き込んだカスタムAMIを事前作成して使用する
 - ベースイメージは一度プッシュすれば再利用できるため、変更時のみ base-build ワークフローを手動実行する
-- ECRへのイメージプッシュはローカルから手動で行うこともできる
+- 通常のアプリイメージのビルド・プッシュは第４部の build Action（`docker build` の build ステージで `composer install`）が担当する
 
 #### カスタムAMI作成手順
 
@@ -721,14 +721,7 @@ NAT Gatewayを使わない設計のため、`legacy_web` EC2は起動時に `dnf
 
 #### ECS FargateのECRアクセス
 
-ECS FargateからECRへのイメージpullは、第３部で `my_new_service` 側に Secrets Manager 用および ECR 用 VPC Endpoint（ECR API・ECR DKR）を追加することで対応する。`shared_platform` のVPC Endpoint（S3・CloudWatch Logs）はそのまま共用できる。ECRへのイメージプッシュをローカルから手動で行う場合は以下の通り。
-
-```bash
-aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin <アカウントID>.dkr.ecr.ap-northeast-1.amazonaws.com
-docker build -t bridge .
-docker tag bridge:latest <ECR_URI>:latest
-docker push <ECR_URI>:latest
-```
+ECS FargateからECRへのイメージpullは、第３部で `my_new_service` 側に Secrets Manager 用および ECR 用 VPC Endpoint（ECR API・ECR DKR）を追加することで対応する。`shared_platform` のVPC Endpoint（S3・CloudWatch Logs）はそのまま共用できる。
 
 #### コスト試算（1日3時間 × 20日稼働の場合）
 
